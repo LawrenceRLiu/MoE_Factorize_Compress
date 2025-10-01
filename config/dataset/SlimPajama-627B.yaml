@@ -1,0 +1,4 @@
+_target_: "src.data.PretrainDatasetConfig"
+dataset_name: "cerebras/SlimPajama-627B"
+dataset_instance: "default"
+split: "train"

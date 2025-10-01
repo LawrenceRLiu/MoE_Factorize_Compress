@@ -1,0 +1,4 @@
+_target_: "src.data.PretrainDatasetConfig"
+dataset_name: "allenai/c4"
+dataset_instance: "multilingual"
+split: "train"

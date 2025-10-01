@@ -1,0 +1,8 @@
+_target_: "src.data.QADatasetConfig"
+dataset_name: "sahil2801/CodeAlpaca-20k"
+dataset_instance: "default"
+split: "train"
+question_column: "instruction"
+context_column: "input"
+answer_column: "output"
+strip_answer: True

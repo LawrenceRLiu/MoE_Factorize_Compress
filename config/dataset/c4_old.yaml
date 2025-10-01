@@ -1,0 +1,3 @@
+_target_: "src.data.LegacyDatasetConfig"
+dataset_name: "c4"
+split: "train"

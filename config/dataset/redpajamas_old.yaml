@@ -1,0 +1,3 @@
+_target_: "src.data.LegacyDatasetConfig"
+dataset_name: "redpajamas"
+split: "train"

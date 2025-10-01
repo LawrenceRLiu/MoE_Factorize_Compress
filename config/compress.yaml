@@ -1,0 +1,34 @@
+defaults:
+  - _self_
+  # compression config
+  - compress: ARMOR
+
+base_model: meta-llama/Llama-2-7b-hf
+verbose: False
+run_name: test_compress #name of the run, used for saving models and logging, this should be changed
+
+
+#dataset level config
+calibration_data_type: hessian_diag
+dataset_config_base_path: config/dataset/
+datasets:
+  - dataset_config: redpajamas_old
+    n_samples: 128
+    ctx_len: 4096
+  
+
+
+#paths to the various files
+data_dir: ../LLM_data
+weight_path: ${data_dir}/${base_model}/original_weights
+calibration_data_path: ${data_dir}/${base_model}/${calibration_data_type}
+save_path: ./models/${base_model}/compressed/${run_name}
+temp_path: ./models/${base_model}/temp/${run_name}
+
+seed: 0
+add_bias: False
+resume_layerwise: True
+log_wandb: False
+#sweep for ablation tests
+iter_sweep: False #whether we are doing a sweep over iterations
+iter_sweep_freq: 1000 #frequency of saving the model during iteration sweep

@@ -1,6 +1,0 @@
-_target_: "src.data.QADatasetConfig"
-dataset_name: "openai/gsm8k"
-dataset_instance: "main"
-split: "train"
-question_column: "question"
-answer_column: "answer"

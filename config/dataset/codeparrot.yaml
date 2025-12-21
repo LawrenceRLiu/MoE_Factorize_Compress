@@ -1,5 +1,0 @@
-_target_: "src.data.PretrainDatasetConfig"
-dataset_name: "codeparrot/codeparrot-clean"
-dataset_instance: "default"
-split: "train"
-text_column: "content"

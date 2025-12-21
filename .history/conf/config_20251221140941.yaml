@@ -1,0 +1,28 @@
+# Main configuration file for MoE Compression
+defaults:
+  - compression: qwen_3_30b
+  - distillation: default
+  - evaluation: default
+  - _self_
+
+# Experiment tracking
+experiment_name: "moe_compression_experiment"
+wandb_project: "moe-compression"
+
+# Device configuration
+gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]  # 2x A100 + 6x A6000
+
+# Model configuration
+model:
+  name: "Qwen/Qwen2.5-MoE-A14B-Chat"  # Example - adjust to actual Qwen-3-30B when available
+  trust_remote_code: true
+
+# Output directories
+output:
+  base_dir: "./models"
+  compressed_dir: "${output.base_dir}/${model.name}/compressed"
+  distilled_dir: "${output.base_dir}/${model.name}/distilled"
+  eval_dir: "${output.base_dir}/${model.name}/evaluation"
+
+# Random seed for reproducibility
+seed: 42

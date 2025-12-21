@@ -1,0 +1,47 @@
+# Knowledge Distillation Configuration
+
+# Dataset configuration
+dataset:
+  name: "HuggingFaceFW/fineweb-edu"
+  split: "train"
+  streaming: true
+  max_length: 2048
+
+# Teacher model configuration
+teacher:
+  # Teacher is the original uncompressed model
+  load_in_8bit: true  # Quantize teacher to save VRAM
+  load_in_4bit: false  # Use 4-bit if even more VRAM saving needed
+
+# Distillation hyperparameters
+temperature: 2.0  # Softmax temperature for distillation
+alpha: 0.5  # Weight for KL loss (1-alpha for CE loss)
+
+# Training configuration
+training:
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8  # Effective batch size = 8
+  learning_rate: 2e-5
+  num_train_epochs: 1
+  max_steps: -1  # Train for full epoch
+  warmup_steps: 100
+  weight_decay: 0.01
+
+  # Optimization
+  optim: "adamw_torch"
+  lr_scheduler_type: "cosine"
+  gradient_checkpointing: true
+
+  # Mixed precision
+  bf16: true
+  fp16: false
+
+# Logging and checkpointing
+logging:
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  save_total_limit: 3
+
+# Evaluation during training
+eval_during_training: false  # Use async eval instead

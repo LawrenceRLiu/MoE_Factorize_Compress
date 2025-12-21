@@ -1,9 +1,0 @@
-ppl_dataset: 
-- wikitext2
-- c4
-zero_shot_tasks:
-- winogrande
-- piqa
-- rte
-- arc_easy
-- arc_challenge

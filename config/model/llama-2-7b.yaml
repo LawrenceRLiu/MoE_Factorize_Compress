@@ -1,5 +1,0 @@
-base_model: meta-llama/Llama-2-7b-hf
-quantized_model_path: /data/lliu/huffman/models/meta-llama/Llama-2-7b-hf/compressed_hf/run_38
-save_path: /data/lliu/huffman/models/meta-llama/Llama-2-7b-hf/ft_layer_by_layer/run_38_1
-seqlen: 4096
-freeze_embeddings: False

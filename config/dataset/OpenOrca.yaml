@@ -1,8 +1,0 @@
-_target_: "src.data.QADatasetConfig"
-dataset_name: "Open-Orca/OpenOrca"
-dataset_instance: "default"
-split: "train"
-question_column: "question"
-answer_column: "response"
-system_prompt_column: "system_prompt"
-strip_answer: True

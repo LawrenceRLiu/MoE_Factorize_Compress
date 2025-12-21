@@ -1,0 +1,33 @@
+# Compression configuration for Qwen-3-30B-A3B
+# Target: 20-30% compression ratio
+
+# Low-rank adapter configuration
+rank: 64  # Adjust based on desired compression ratio
+
+# Zero-shot initialization parameters
+num_steps: 1000  # Optimization steps for reconstruction
+lr: 1e-3  # Learning rate for Adam optimizer
+
+# Which projections to compress
+projections:
+  - gate_proj
+  - up_proj
+  - down_proj
+
+# Parallelization settings
+num_layers: null  # Will be inferred from model config
+parallel_mode: true  # Use parallel GPU compression
+
+# Compression ratio target
+# For Qwen-3-30B with typical MoE structure:
+# - Each expert: d_model * ffn_dim (e.g., 4096 * 14336)
+# - With rank=64: core + E * (2*d_model*r + 2*ffn_dim*r)
+# Example calculation for 8 experts, d=4096, ffn=14336:
+#   Original: 8 * 4096 * 14336 = 470M params per layer
+#   Compressed: 4096*14336 + 8*(2*4096*64 + 2*14336*64) = 73M params per layer
+#   Ratio: 73M/470M = 0.155 (84.5% reduction)
+
+# Expected compression statistics
+expected_compression:
+  target_ratio: 0.25  # 75% reduction
+  acceptable_range: [0.20, 0.30]  # 70-80% reduction

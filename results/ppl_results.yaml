@@ -1,0 +1,8 @@
+c4:
+  model_name: Qwen/Qwen3-30B-A3B
+  ppl: 7.908181190490723
+  seqlen: 8192
+wikitext2:
+  model_name: Qwen/Qwen3-30B-A3B
+  ppl: 7.705528736114502
+  seqlen: 8192

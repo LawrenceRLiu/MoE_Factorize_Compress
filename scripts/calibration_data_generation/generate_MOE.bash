@@ -1,5 +1,5 @@
 #!/bin/bash
-enviroment="ARMOR_main"
+enviroment="Permute"
 source $(conda info --base)/etc/profile.d/conda.sh
 conda activate $enviroment
 #get the model name, and the 
@@ -9,7 +9,7 @@ n_samples=$3
 
 #if we get a 4th argument, use it as the seqlen
 if [ -z "$4" ]; then
-    seqlen=-1
+    seqlen=$4
     echo "Using default seqlen of maximum context length."
 else
     seqlen=$4
@@ -19,15 +19,16 @@ echo "Generating calibration data for model: $model, dataset: $dataset, blockwis
 #if we are doing blockwise 
 
 echo "Using standard generation script."
-python scripts/calibration_data_generation/generate.py \
+python scripts/calibration_data_generation/generate_MOE.py \
     --model $model \
     --dataset config/dataset/${dataset}.yaml \
     --seqlen $seqlen \
     --n_samples $n_samples \
     --seed 0 \
-    --forward_batch_size 1 \
+    --forward_batch_size 8 \
     --log_object hessian_diag \
     --save_path "../LLM_data" \
     --save_weights \
-    --save_calibration_data
+    --save_calibration_data \
+    --overwrite_existing
 

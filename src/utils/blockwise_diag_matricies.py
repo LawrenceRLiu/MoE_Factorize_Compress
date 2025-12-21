@@ -23,20 +23,19 @@ class BlockwiseDiagMatrix(nn.Module):
     def forward(self, x, leading:bool = True):
         """
         Forward pass for the blockwise diagonal matrix.
-        :param x: Input tensor of shape (..., d) if leading is False, or (..., d, m) if leading is True.
+        :param x: Input tensor of shape (..., d)
         :param leading: If True, treat the blockwise matrix as leading (left multiplication).
-        :return: Output tensor after applying the blockwise diagonal matrix. should be of the same shape as x
+        :return: Output tensor after applying the blockwise diagonal matrix.
         """
         if leading:
-            #assumes its (block_matrix) @ x
-            #equivalent to calling self.__matmul__(x)
             assert x.shape[-2] == self.d, "Input dimension must match the matrix dimension"
-            # Perform blockwise multiplication
-       
+        # Perform blockwise multiplication
+        # print("x shape:", x.view(x.shape[:-2] + (self.num_blocks, self.block_size, x.shape[-1])).shape)
+        # print("diag_blocks shape:", self.diag_blocks.shape)
+        # print("x.view(x.shape[:-2] + (self.num_blocks, self.block_size, x.shape[-1])).shape:", x.view(x.shape[:-2] + (self.num_blocks, self.block_size, x.shape[-1])).shape)
+        # print("self.diag_blocks.shape:", self.diag_blocks.shape)
             result = torch.einsum('bik,...bkl->...bil', self.diag_blocks, x.reshape(x.shape[:-2] + (self.num_blocks, self.block_size, x.shape[-1])))
         else:
-            #assumes its x @ (block_matrix)
-            #equivalent to calling self.__rmatmul__(x)
             assert x.shape[-1] == self.d, "Input dimension must match the matrix dimension"
             # Perform blockwise multiplication
             result = torch.einsum('...bi,bij->...bj', x.reshape(-1, self.num_blocks, self.block_size), self.diag_blocks)
@@ -47,6 +46,10 @@ class BlockwiseDiagMatrix(nn.Module):
     def __matmul__(self, x: torch.Tensor) -> torch.Tensor:
         assert x.shape[-2] == self.d, "Input dimension must match the matrix dimension"
         # Perform blockwise multiplication
+        # print("x shape:", x.view(x.shape[:-2] + (self.num_blocks, self.block_size, x.shape[-1])).shape)
+        # print("diag_blocks shape:", self.diag_blocks.shape)
+        # print("x.view(x.shape[:-2] + (self.num_blocks, self.block_size, x.shape[-1])).shape:", x.view(x.shape[:-2] + (self.num_blocks, self.block_size, x.shape[-1])).shape)
+        # print("self.diag_blocks.shape:", self.diag_blocks.shape)
         result = torch.einsum('bik,...bkl->...bil', self.diag_blocks, x.reshape(x.shape[:-2] + (self.num_blocks, self.block_size, x.shape[-1])))
         return result.reshape_as(x)
             

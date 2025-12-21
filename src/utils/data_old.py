@@ -172,6 +172,7 @@ def get_c4(nsamples, seed, seqlen, model, train_test: str = "train"):
                 # print(tmp.input_ids.shape[1] - seqlen - 1)
                 if tmp.input_ids.shape[1] >= seqlen:
                     break
+            
             i = random.randint(0, tmp.input_ids.shape[1] - seqlen - 1)
             j = i + seqlen
             # print("-------------------J-----------------------")

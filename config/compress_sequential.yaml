@@ -1,8 +1,7 @@
 defaults:
   - _self_
   # compression config
-  - compress: prune_2_4
-  - eval: default
+  - compress: wanda
 
 base_model: meta-llama/Llama-2-7b-hf
 seqlen: -1 # -1 means native seqlen
@@ -24,16 +23,18 @@ datasets:
 
 
 #paths to the various files
-data_dir: ../LLM_data
+data_dir: /data/lliu/LLM_data
 weight_path: ${data_dir}/${base_model}/original_weights
 calibration_data_path: ${data_dir}/${base_model}/${calibration_data_type}
 save_path: ./models/${base_model}/compressed/${run_name}
 temp_path: ./models/${base_model}/temp/${run_name}
 
+batch_size: 4
 seed: 0
 add_bias: False
+offload_activations: False
 resume: False
-resume_layerwise: True
+resume_layerwise: False
 push_to_hub: False
 log_wandb: False
 create_non_compressed_model: False #whether we are creating a non-compressed model with the same weights for evaluation

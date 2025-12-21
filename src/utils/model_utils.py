@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 import transformers
 from transformers import AutoConfig
 from omegaconf import DictConfig, OmegaConf
+import re
 
 # DEV = torch.device("cuda:0")
 
@@ -27,7 +28,15 @@ def get_compressed_model_class(base_model: str):
         print("returning LlamaForCausalLM")
         return LlamaForCausalLM
     elif base_model.startswith("Qwen/Qwen3-"):
+        #if it has something along the lines of "*-{total_params}B-A{active_params}B-*" its a MOE
+        #regex match for pattern like "14B-A2.7B" or "57B-A14B"
+        if re.search(r'\d+\.?\d*B-A\d+\.?\d*B', base_model):
+            from ..model.qwen_3_moe import Qwen3MoeForCausalLM
+            print("returning Qwen3MoeForCausalLM")
+            return Qwen3MoeForCausalLM
+
         from ..model.qwen3 import Qwen3ForCausalLM
+        print("returning Qwen3ForCausalLM")
         return Qwen3ForCausalLM
     elif base_model.startswith("Qwen/Qwen2-") or base_model.split("/")[1].startswith("DeepSeek-R1-Distill-Qwen") or base_model.startswith("Qwen/Qwen2.5-"):
         from ..model.qwen2 import Qwen2ForCausalLM

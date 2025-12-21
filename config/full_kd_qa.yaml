@@ -1,0 +1,38 @@
+seed: 0
+base_model: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+student_model_path: ./models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/compressed/BlockPrune/64/20250804_025849/model
+verbose: True
+log_with: wandb
+
+# Dataset level config
+dataset_config_base_path: config/dataset/
+datasets:
+  - dataset_config: gsm8k
+    n_samples: 128
+    ctx_len: 1024
+
+# Training configuration
+training:
+  output_dir: ./models/${base_model}/ft_qa/BlockPrune_64/model
+  epochs: 3
+  batch_size: 1
+  batch_size_val: 1
+  gradient_accumulation_steps: 8
+  mixed_precision: bf16
+  optimizer:
+    lr: 1.0e-5
+    weight_decay: 0.01
+  max_grad_norm: 1.0
+  scheduler:
+    num_warmup_steps: 50
+
+# Knowledge Distillation configuration
+distillation:
+  temperature: 2.0
+  alpha: 0.5 # Weight for combining KD loss and CE loss
+  use_activation_loss: False
+  freeze_embedding: True # Freeze the embedding layer of the student model
+  freeze_lm_head: False # Freeze the output layer of the student model
+
+training:
+  train_val_split: 0.9 # 90% train, 10% validation

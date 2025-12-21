@@ -1,0 +1,14 @@
+init_config:
+  _target_: "src.sparsegpt_compress.SparseGPT_Linear"
+
+compression_config:
+  frac_nonzero: 0.5
+  normalizer_kwargs:
+    norm_order: []
+    zero:
+    - false
+    - false
+    p: 2
+  #pattern: 
+  #  - 2
+  #  - 4

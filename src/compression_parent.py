@@ -1,3 +1,4 @@
+# copied from https://github.com/LawrenceRLiu/NoWag
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,7 +9,6 @@ import os
 from typing import Tuple, Optional, Union, List, Literal
 import src.utils.compress as compress_utils
 from src.utils.normalizer import Normalizer
-import src.utils.utils as utils
 from typing import Optional, Union
 from dataclasses import dataclass
 
@@ -271,7 +271,10 @@ class CompressedLinear(nn.Module):
         
         with torch.no_grad():
             valid = torch.isfinite(self.hessianDiag) & (self.hessianDiag > 0)
-            if torch.sum(~valid) > 0:
+            if torch.all(~valid):
+                print("WARNING: all hessian diag are non valid, setting to ones")
+                self.hessianDiag = torch.ones_like(self.hessianDiag)
+            elif torch.sum(~valid) > 0:
                 print("non-valid hessian diag values:", (~valid).sum().item(), "out of", self.hessianDiag.numel())
                 mean_hessian_diag = self.hessianDiag[valid].mean().item()
                 self.hessianDiag[~valid] = mean_hessian_diag
@@ -291,6 +294,8 @@ class CompressedLinear(nn.Module):
         return torch.utils.checkpoint.checkpoint(
             self._no_checkpoint_forward, x, use_reentrant=True
         )
+
+    # ================= Backwards Fns =================
 
     # ================= Reconstruction Fns =================
     def reconstruct(self, **kwargs) -> torch.FloatTensor:
@@ -326,7 +331,88 @@ class CompressedLinear(nn.Module):
     def delete_cache_reconstruct(self):
         del self.cached_reconstruct
 
+    def get_reconstruction_error(
+        self,
+        error_weight: Optional[torch.FloatTensor] = None,
+        reconstruction_kwargs: Optional[dict] = None,
+    ) -> torch.FloatTensor:
+        """returns the reconstruction error"""
+        with torch.no_grad():
+            # if weight is none, then just return the mean squared error
+            if error_weight is None:
+                return torch.mean((self.reconstruct() - self.original_weight) ** 2)
+            # if its a 1d vector, then we assume its the diagonal of the hessian
+            if len(error_weight.shape) == 1:
+                return torch.mean(
+                    (self.reconstruct() - self.original_weight) ** 2
+                    * error_weight.unsqueeze(0)
+                )
+            else:
+                return hessian_general_align.loss(
+                    self.reconstruct(), self.original_weight, error_weight
+                )
 
+    # ================= Misc Fns =================
+    def align(
+        self,
+        val_hessian: Optional[torch.FloatTensor] = None,
+        lr: float = 1e-3,
+        lr_multiplier: float = 1,  # decay the lr by this factor every time the val loss increases
+        n_iters: int = 100,
+        val_every: int = 1,
+        discrete_update_every: int = 1,
+        reinitialize_optimizer: bool = True,
+        clip_grad: float = -1,
+        verbose: Union[bool, int] = 10,
+        low_bound: float = 1e-5,
+        patience: int = 10,
+        patience_scheduler: int = 2,
+        eps: float = 1e-5,
+        discrete_update_kwargs: Optional[dict] = {},
+        **kwargs,
+    ):
+        """aligns the compression module to the hessian of the training dataset
+
+        Args:
+            val_hessian (Optional[torch.FloatTensor], optional): the hessian of the validation dataset, if None, we don't use it. Defaults to None.
+            lr (float, optional): the learning rate for the optimizer. Defaults to 1e-3.
+            lr_multiplier (float, optional): multiply the learning rate by this factor every time the validation loss increases. Defaults to 1.
+            val_every (int, optional): validate the model every this number of iterations on the validation hessian. Defaults to 1.
+            discrete_update_every (int, optional): update the discrete variables every this number of iteration. Defaults to 1.
+            clip_grad (float, optional): clip the gradient norm to this value. Defaults to -1 in which case we don't clip the gradient.
+            verbose (bool, optional): print every this number of iterations. If False, we don't print anything. If True, we print at the end only. Defaults to False.
+            low_bound (float, optional): the lower bound for the error, below which we stop training. Defaults to 1e-5.
+            patience (int, optional): the patience for the early stop, if the loss has not improved by eps for this number of iterations, we stop training. Defaults to 10.
+            patience_scheduler (int, optional): the patience for the learning rate scheduler. Defaults to 2.
+            eps (float, optional): the minimum improvement in the loss to consider it as an improvement. Defaults to 1e-5.
+
+        """
+        print(reinitialize_optimizer)
+        _, best_loss = hessian_general_align.align(
+            compression_module=self,
+            original_weights=self.original_weight,
+            train_hessian=self.hessian,
+            val_hessian=val_hessian,
+            lr=lr,
+            lr_multiplier=lr_multiplier,
+            n_iters=n_iters,
+            val_every=val_every,
+            discrete_update_every=discrete_update_every,
+            reinitialize_optimizer=reinitialize_optimizer,
+            clip_grad=clip_grad,
+            verbose=verbose,
+            low_bound=low_bound,
+            patience=patience,
+            patience_scheduler=patience_scheduler,
+            eps=eps,
+            discrete_update_kwargs=discrete_update_kwargs,
+            **kwargs,
+        )
+        return best_loss
+
+    def update_discrete(self, **kwargs):
+        """updates the discrete values of the quantizer"""
+        pass
 
     def clean(self):
         if hasattr(self, "original_weight"):

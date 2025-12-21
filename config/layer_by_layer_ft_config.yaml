@@ -1,0 +1,41 @@
+defaults:
+  - eval: default
+
+
+datasets:
+  - dataset_config: SlimPajama-627B
+    n_samples: 128
+    ctx_len: 8192
+
+base_model: meta-llama/Llama-2-7b-hf
+run_name: _EMPTY_ #replace with the name of the run 
+
+compressed_model_path: ./models/${base_model}/compressed/${run_name}
+save_path: ./models/${base_model}/layer_ft/${run_name}
+
+seed: 0
+sequential: True
+seqlen: -1 # -1 means native seqlen
+log_wandb: False
+resume: False
+
+
+ft_args:
+  batch_size: 2
+  batch_size_val: 16
+  num_epochs: 5
+  grad_accum_steps: 1
+  optimizer_config:
+    _target_: torch.optim.AdamW
+    lr: 1.0e-4
+    betas: [0.9, 0.999]
+  scheduler_config:
+    _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+    mode: min
+    factor: 0.1
+    patience: 1
+    threshold: 1.0e-9
+  early_stop_patience: 3
+  clip_grad: 0.0
+  temp_dir: ${save_path}/temp
+  train_split: 0.75 #75% train, 25% validation

@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import math
 
-#logging functions for hessian and hessian diagonal
 
 def hessian_mean_logging(module, input):
     """updates the mean of the hessian"""

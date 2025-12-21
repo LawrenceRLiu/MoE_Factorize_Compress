@@ -27,6 +27,7 @@ from src.utils.model_utils import find_layers, load_model, inference_layer
 import src.data as data
 import src.utils.utils as utils
 import copy
+from transformers.models.qwen3_moe import modeling_qwen3_moe
 from transformers import AutoModelForCausalLM, AutoTokenizer    
 try:
     import wandb
@@ -35,6 +36,87 @@ try:
 except:
     has_wandb = False
 
+
+def replace_with_compressed(
+    layer: nn.Module,
+    layer_name: str,
+    log_object: str,
+    save_weight: bool,
+    save_weight_path: str,
+    parameters_accounted_for: int,
+):
+    """Replace a linear layer with a CompressedLinear layer that logs hessian or hessian_diag.
+
+    Args:
+        layer (nn.Module): The layer containing the linear layer to replace.
+        layer_name (str): The name of the linear layer to replace.
+        log_object (str): What to log (hessian or hessian_diag).
+        save_weight (bool): Whether to save the original weights.
+        save_weight_path (str): Path to save the original weights.
+
+    Returns:
+        None
+    """
+    original_layer: nn.Linear = getattr(layer, layer_name)
+    assert isinstance(original_layer, nn.Linear), f"Layer {layer_name} is not a nn.Linear"
+    parameters_accounted_for += original_layer.weight.numel()
+    if save_weight:
+        save_weight_path_use = f"{save_weight_path}{layer_name}.pt"
+        os.makedirs(os.path.dirname(save_weight_path_use), exist_ok=True)
+        torch.save(
+            {"weight": original_layer.weight, "bias": original_layer.bias},
+            save_weight_path_use,
+        )
+
+    new_layer = compression_parent.CompressedLinear(
+        original_layer.weight, original_layer.bias
+    )
+
+    if log_object == "hessian":
+        new_layer.enable_hessian_logging()
+    elif log_object == "hessian_diag":
+        new_layer.enable_hessianDiag_logging()
+    else:
+        raise ValueError(f"Unknown log_object: {log_object}")
+
+    setattr(layer, layer_name, new_layer)
+    del original_layer  # Remove the original layer to free memory
+    return layer, parameters_accounted_for
+
+def save_compressed_log_object(
+    layer: nn.Module,
+    layer_name: str,
+    log_object: str,
+    save_path: str,
+):
+    """Save the logged calibration data from a CompressedLinear layer.
+
+    Args:
+        layer (nn.Module): The layer containing the CompressedLinear layer.
+        layer_name (str): The name of the CompressedLinear layer.
+        log_object (str): What to save (hessian or hessian_diag).
+        save_path (str): Path to save the logged data.
+        layer_idx (int): Index of the layer for naming purposes.
+    Returns:
+        None
+    """
+    projection = getattr(layer, layer_name)
+
+    save_file_path = f"{save_path}{layer_name}.pt"
+    if log_object == "hessian":
+        os.makedirs(os.path.dirname(save_file_path), exist_ok=True)
+        torch.save({"hessian": projection.hessian}, save_file_path)
+    elif log_object == "hessian_diag":
+        os.makedirs(os.path.dirname(save_file_path), exist_ok=True)
+        #check that its all non-zero
+        if torch.any(projection.hessianDiag == 0):
+            print("WARNING: Hessian diag is all zero, likely this expert has not seen any tokens")
+        # assert torch.all(projection.hessianDiag != 0), "Hessian diag has zero values!"
+        torch.save({"hessianDiag": projection.hessianDiag}, save_file_path)
+
+    projection.clean()
+
+    
 
 @torch.no_grad()
 def generate_calibration_data(model: AutoModelForCausalLM,
@@ -69,44 +151,55 @@ def generate_calibration_data(model: AutoModelForCausalLM,
     total_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     parameters_accounted_for = 0
     
-    linear_projections = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
-              "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]  #hard coded for now, may have to change later
-    
+    attention_projections = ["q_proj", "k_proj", "v_proj", "o_proj"]  #hard coded for now, may have to change later
+    mlp_projections = ["up_proj", "gate_proj", "down_proj"]
     # Find the layers in the model 
-    for i, layer in enumerate(model.model.layers):
-        for name in linear_projections:
-            #find the layer
-            original_layer:nn.Linear = getattr(getattr(layer, name.split(".")[0]), name.split(".")[1])
-            
-            # account for these parameters
-            parameters_accounted_for += original_layer.weight.numel()
-            if original_layer.bias is not None:
-                parameters_accounted_for += original_layer.bias.numel()
-            
-            #save the original weights if required
-            if save_weights:
-                weight_save_path = os.path.join(
-                    save_path, "original_weights", f"layer_{i}/{name}.pt"
+    for i, layer in tqdm.tqdm(enumerate(model.model.layers)):
+        # print(layer)
+        for name in attention_projections:
+            layer.self_attn, parameters_accounted_for = replace_with_compressed(
+                layer=layer.self_attn,
+                layer_name=name,
+                log_object=log_object,
+                save_weight=save_weights,
+                save_weight_path=os.path.join(
+                    save_path,
+                    "original_weights",
+                    "layer_{i}/self_attn.".format(i=i),
+                ),
+                parameters_accounted_for=parameters_accounted_for,
+            )
+        
+        #if we are dealing with an MoE mlp 
+        if isinstance(layer.mlp, modeling_qwen3_moe.Qwen3MoeSparseMoeBlock):
+            for j, expert in enumerate(layer.mlp.experts):
+                for name in mlp_projections:
+                    layer.mlp.experts[j], parameters_accounted_for = replace_with_compressed(
+                        layer=expert,
+                        layer_name=name,
+                        log_object=log_object,
+                        save_weight=save_weights,
+                        save_weight_path=os.path.join(
+                            save_path,
+                            "original_weights",
+                            f"layer_{i}/mlp.expert_{j}."
+                        ),
+                        parameters_accounted_for=parameters_accounted_for,
+                    )
+        else:
+            for name in mlp_projections:
+                layer.mlp, parameters_accounted_for = replace_with_compressed(
+                    layer=layer.mlp,
+                    layer_name=name,
+                    log_object=log_object,
+                    save_weight=save_weights,
+                    save_weight_path=os.path.join(
+                        save_path,
+                        "original_weights",
+                        "layer_{i}/mlp.".format(i=i),
+                    ),
+                    parameters_accounted_for=parameters_accounted_for,
                 )
-                os.makedirs(os.path.dirname(weight_save_path), exist_ok=True)
-                # print("saving weights to", weight_save_path)
-                torch.save(
-                    {"weight": original_layer.weight, "bias": original_layer.bias},
-                    weight_save_path,
-                )
-            
-            #replace the original layer with a CompressedLinear layer
-            new_layer = compression_parent.CompressedLinear(original_layer.weight,
-                                                            original_layer.bias)
-            
-            if log_object == "hessian":
-                new_layer.enable_hessian_logging()
-            elif log_object == "hessian_diag":
-                new_layer.enable_hessianDiag_logging()
-            else:
-                raise ValueError(f"Unknown log_object: {log_object}")
-            setattr(getattr(layer, name.split(".")[0]), name.split(".")[1], new_layer)
-            del original_layer  # Remove the original layer to free memory
             
     print(f"Total parameters: {total_parameters/10**9:.2f}B, Parameters accounted for: {parameters_accounted_for/10**9:.2f}B",
             f"Fraction accounted for: {parameters_accounted_for / total_parameters:.4f}")
@@ -123,36 +216,53 @@ def generate_calibration_data(model: AutoModelForCausalLM,
         model(input_ids=batch_tokens, attention_mask=batch_attention_mask)
         
     #get the logged calibration data from the model 
-    for i, layer in enumerate(model.model.layers):
-        for name in linear_projections:
-            projection = getattr(
-                        getattr(layer, name.split(".")[0]), name.split(".")[1]
+    save_file_path = os.path.join(
+        save_path,
+        log_save_subdir,
+    )
+    for i, l in enumerate(model.model.layers):
+        for name in attention_projections:
+            save_compressed_log_object(
+                layer=l.self_attn,
+                layer_name=name,
+                log_object=log_object,
+                save_path=os.path.join(
+                    save_file_path,
+                    f"layer_{i}/self_attn."
+                ),
+            )
+        #if we are dealing with an MoE mlp
+        if isinstance(l.mlp, modeling_qwen3_moe.Qwen3MoeSparseMoeBlock):
+            for j, expert in enumerate(l.mlp.experts):
+                for name in mlp_projections:
+                    save_compressed_log_object(
+                        layer=expert,
+                        layer_name=name,
+                        log_object=log_object,
+                        save_path=os.path.join(
+                            save_file_path,
+                            f"layer_{i}/mlp.expert_{j}."
+                        ),
                     )
-
-            if log_object == "hessian":
-                save_file_path = os.path.join(
-                    save_path,
-                    log_save_subdir,
-                    f"layer_{i}/{name}.pt"
+        else:
+            for name in mlp_projections:
+                save_compressed_log_object(
+                    layer=l.mlp,
+                    layer_name=name,
+                    log_object=log_object,
+                    save_path=os.path.join(
+                        save_file_path,
+                        f"layer_{i}/mlp."
+                    ),
                 )
-                os.makedirs(os.path.dirname(save_file_path), exist_ok=True)
-                torch.save({"hessian": projection.hessian}, save_file_path)
-            elif log_object == "hessian_diag":
-                save_file_path = os.path.join(
-                    save_path,
-                    log_save_subdir,
-                    f"layer_{i}/{name}.pt"
-                )
-                os.makedirs(os.path.dirname(save_file_path), exist_ok=True)
-                torch.save({"hessianDiag": projection.hessianDiag}, save_file_path)
-
-            projection.clean()
+    
     
 
 def main(model: str, dataset: str, seqlen: int, seed: int = 0, 
          n_samples: int = 128, forward_batch_size: int = 4, 
          log_object: str = "hessian_diag", save_path: str = "./", 
-         save_weights: bool = False, save_calibration_data: bool = False):
+         save_weights: bool = False, save_calibration_data: bool = False,
+         overwrite_existing: bool = False):
     """Main function that takes individual parameters instead of args object.
     
     Args:
@@ -211,7 +321,7 @@ def main(model: str, dataset: str, seqlen: int, seed: int = 0,
             existing_cfg = yaml.safe_load(open(os.path.join(save_path, log_save_subdir,
                                                             "dataset_config.yaml"), "r"))
             new_cfg = yaml.safe_load(open(dataset, "r"))
-            if existing_cfg == new_cfg:
+            if existing_cfg == new_cfg and not overwrite_existing:
                 print("Calibration data already exists, skipping generation.")
                 return
         with open(os.path.join(save_path, log_save_subdir, "dataset_config.yaml"), "w") as f:
@@ -290,6 +400,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Save the calibration data used for generating the hessians. for debugging purposes.",
     )
+    parser.add_argument(
+        "--overwrite_existing",
+        action="store_true",
+        help="Overwrite existing calibration data if it exists.",
+    )
     args = parser.parse_args()
     
     # Call the main function with individual arguments
@@ -303,5 +418,6 @@ if __name__ == "__main__":
         log_object=args.log_object,
         save_path=args.save_path,
         save_weights=args.save_weights,
-        save_calibration_data=args.save_calibration_data
+        save_calibration_data=args.save_calibration_data,
+        overwrite_existing=args.overwrite_existing,
     )

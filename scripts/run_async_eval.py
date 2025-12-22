@@ -61,6 +61,7 @@ def main(cfg: DictConfig):
     # Create eval config
     eval_config = EvalConfig(
         checkpoint_dir=cfg.output.distilled_dir,
+        original_model_name=cfg.model.name,  # Needed for export
         eval_tasks=cfg.evaluation.tasks,
         gpu_ids=cfg.evaluation.async_eval.gpu_ids,
         eval_batch_size=cfg.evaluation.batch_size,
@@ -68,7 +69,8 @@ def main(cfg: DictConfig):
         wandb_project=cfg.wandb_project,
         wandb_run_name=f"{cfg.experiment_name}_eval",
         num_fewshot=cfg.evaluation.num_fewshot,
-        limit=cfg.evaluation.test_mode.limit if cfg.evaluation.test_mode.enabled else None
+        limit=cfg.evaluation.test_mode.limit if cfg.evaluation.test_mode.enabled else None,
+        use_export=cfg.evaluation.get('use_export', True)  # Export to HF format by default
     )
 
     logger.info("\nEvaluation Configuration:")

@@ -13,17 +13,45 @@ from transformers import (
     TrainingArguments,
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig
+    BitsAndBytesConfig,
+    TrainerCallback
 )
 from datasets import load_dataset
 from typing import Dict, Optional, Any
 import logging
 from dataclasses import dataclass
 import wandb
+from pathlib import Path
+
+from .compressed_moe_model import load_compressed_model, save_compressed_model
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class CompressedModelSaveCallback(TrainerCallback):
+    """
+    Callback to properly save compressed models during training.
+
+    Since we have a custom architecture, we can't use the default save method.
+    This callback overrides the default saving behavior.
+    """
+
+    def on_save(self, args, state, control, **kwargs):
+        """Save compressed model using custom save function."""
+        model = kwargs.get('model')
+        tokenizer = kwargs.get('tokenizer')
+
+        if model is not None:
+            output_dir = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+            logger.info(f"Saving compressed model to {output_dir}")
+            save_compressed_model(model, str(output_dir), tokenizer)
+
+            # Prevent default save behavior
+            control.should_save = False
+
+        return control
 
 
 @dataclass
@@ -276,15 +304,28 @@ def setup_distillation(config: DistillationConfig):
     teacher_model = AutoModelForCausalLM.from_pretrained(**teacher_kwargs)
     teacher_model.eval()
 
-    # Load student model
-    logger.info(f"Loading student model from: {config.student_model_path}")
-    # TODO: This should load the compressed model
-    # For now, load a copy of the teacher as placeholder
-    student_model = AutoModelForCausalLM.from_pretrained(
-        config.student_model_path,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True
-    )
+    # Load student model (compressed)
+    logger.info(f"Loading compressed student model from: {config.student_model_path}")
+
+    # Check if this is a compressed model directory or original model
+    student_path = Path(config.student_model_path)
+    if (student_path / "compression_config.json").exists():
+        # Load compressed model
+        logger.info("Detected compressed model, loading with custom loader...")
+        student_model = load_compressed_model(
+            compressed_dir=config.student_model_path,
+            original_model_name=config.teacher_model,
+            device_map="auto",
+            torch_dtype=torch.bfloat16
+        )
+    else:
+        # Fallback to standard loading (for testing or non-compressed models)
+        logger.warning("No compression_config.json found, loading as standard model")
+        student_model = AutoModelForCausalLM.from_pretrained(
+            config.student_model_path,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True
+        )
 
     # Prepare dataset
     train_dataset = prepare_dataset(
@@ -316,7 +357,7 @@ def setup_distillation(config: DistillationConfig):
         optim="adamw_torch",
     )
 
-    # Create distillation trainer
+    # Create distillation trainer with custom save callback
     trainer = DistillationTrainer(
         teacher_model=teacher_model,
         temperature=config.temperature,
@@ -325,6 +366,7 @@ def setup_distillation(config: DistillationConfig):
         args=training_args,
         train_dataset=train_dataset,
         tokenizer=tokenizer,
+        callbacks=[CompressedModelSaveCallback()]
     )
 
     return trainer, tokenizer
@@ -344,7 +386,7 @@ def run_distillation(config: DistillationConfig):
     trainer.train()
 
     logger.info("Saving final model")
-    trainer.save_model()
-    tokenizer.save_pretrained(config.output_dir)
+    # Use custom save for compressed model
+    save_compressed_model(trainer.model, config.output_dir, tokenizer)
 
     logger.info("Distillation complete!")

@@ -20,6 +20,10 @@ async_eval:
   eval_interval: 60  # Check for new checkpoints every 60 seconds
   gpu_ids: [6, 7]  # Reserve last 2 GPUs for evaluation
 
+# Export compressed models to HF format before evaluation
+# This materializes the compressed experts so lm_eval can load them
+use_export: true
+
 # Baseline evaluation
 evaluate_baseline: true  # Evaluate original model for comparison
 

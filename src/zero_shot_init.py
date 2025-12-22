@@ -16,6 +16,7 @@ from dataclasses import dataclass, asdict
 import os
 
 from .shared_core import initialize_from_experts, SharedCoreLayer
+from .compression_stats import CompressionStats, infer_num_active_experts
 
 
 logging.basicConfig(level=logging.INFO)
@@ -169,19 +170,6 @@ class MoELayerCompressor:
             }
         }
 
-        # Calculate compression stats
-        num_experts = len(expert_weights)
-        original_params = num_experts * d_in * d_out
-        core_params = d_in * d_out
-        wrapper_params = num_experts * (2 * d_in * self.rank + 2 * d_out * self.rank)
-        total_params = core_params + wrapper_params
-
-        logger.info(f"Compression stats for layer {self.layer_idx}, {projection}:")
-        logger.info(f"  Original params: {original_params:,}")
-        logger.info(f"  Compressed params: {total_params:,}")
-        logger.info(f"  Compression ratio: {total_params / original_params:.4f}")
-        logger.info(f"  Reduction: {(1 - total_params / original_params) * 100:.2f}%")
-
         return result
 
 
@@ -269,11 +257,15 @@ def parallel_compression(
         gpu_ids: List of GPU IDs to use
         num_layers: Number of layers to compress (if None, infer from model config)
     """
-    # Get model config to determine number of layers
+    # Get model config to determine number of layers and active experts
+    model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     if num_layers is None:
-        model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         num_layers = model_config.num_hidden_layers
         logger.info(f"Model has {num_layers} layers")
+
+    # Infer number of active experts for statistics
+    num_active_experts = infer_num_active_experts(model_config)
+    logger.info(f"Model uses {num_active_experts} active experts per token")
 
     # Create work items: (layer_idx, projection)
     work_items = []
@@ -333,6 +325,31 @@ def parallel_compression(
 
     logger.info("All compression tasks completed!")
     logger.info(f"Results saved to: {output_dir}")
+
+    # Collect and save compression statistics
+    logger.info("\nCollecting compression statistics...")
+    stats = CompressionStats()
+
+    for layer_idx in range(num_layers):
+        layer_dir = output_dir / f"layer_{layer_idx}"
+        for projection in config.projections:
+            metadata_path = layer_dir / f"{projection}_metadata.json"
+            if metadata_path.exists():
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                stats.add_layer_stats(
+                    layer_idx=layer_idx,
+                    projection=projection,
+                    num_experts=metadata["num_experts"],
+                    d_in=metadata["d_in"],
+                    d_out=metadata["d_out"],
+                    rank=metadata["rank"],
+                    num_active_experts=num_active_experts
+                )
+
+    # Save aggregate statistics
+    stats.save(output_dir / "compression_statistics.yaml")
+    logger.info("Compression statistics saved!")
 
 
 def load_compressed_model(

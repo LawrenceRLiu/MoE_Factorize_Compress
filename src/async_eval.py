@@ -15,6 +15,8 @@ from dataclasses import dataclass, asdict
 import wandb
 import subprocess
 
+from .compressed_moe_model import load_compressed_model, export_to_hf_format
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 class EvalConfig:
     """Configuration for async evaluation."""
     checkpoint_dir: str
+    original_model_name: str  # Needed for export
     eval_tasks: List[str]
     gpu_ids: List[int]  # GPUs to use for evaluation
     eval_batch_size: int = 8
@@ -32,6 +35,7 @@ class EvalConfig:
     wandb_run_name: Optional[str] = None
     num_fewshot: int = 0
     limit: Optional[int] = None  # Limit samples per task (for testing)
+    use_export: bool = True  # Export to HF format before eval (recommended)
 
 
 class CheckpointEvaluator:
@@ -100,6 +104,9 @@ class CheckpointEvaluator:
         """
         Evaluate a single checkpoint using lm-evaluation-harness.
 
+        If the checkpoint is in compressed format, it will be exported to
+        standard HuggingFace format first (if use_export=True).
+
         Args:
             checkpoint_path: Path to checkpoint directory
 
@@ -108,14 +115,39 @@ class CheckpointEvaluator:
         """
         logger.info(f"Evaluating checkpoint: {checkpoint_path}")
 
+        # Check if this is a compressed model (has compression_config.json)
+        eval_path = checkpoint_path
+        if self.config.use_export and (checkpoint_path / "compression_config.json").exists():
+            logger.info("Detected compressed model, exporting to HF format for evaluation...")
+
+            export_path = checkpoint_path / "exported_for_eval"
+
+            # Only export if not already done
+            if not export_path.exists():
+                try:
+                    export_to_hf_format(
+                        compressed_model_path=str(checkpoint_path),
+                        original_model_name=self.config.original_model_name,
+                        output_path=str(export_path),
+                        device_map=f"cuda:{self.config.gpu_ids[0]}",  # Use eval GPU
+                        torch_dtype=torch.bfloat16
+                    )
+                    eval_path = export_path
+                    logger.info(f"Export complete, will evaluate: {eval_path}")
+                except Exception as e:
+                    logger.error(f"Export failed: {e}", exc_info=True)
+                    logger.warning("Will try to evaluate compressed model directly (may fail)")
+            else:
+                logger.info(f"Using existing export: {export_path}")
+                eval_path = export_path
+
         # Build lm_eval command
-        # Using the lm_eval CLI tool from the lm-evaluation-harness library
         device_str = ",".join(str(gpu) for gpu in self.config.gpu_ids)
 
         cmd = [
             "lm_eval",
             "--model", "hf",
-            "--model_args", f"pretrained={checkpoint_path},dtype=bfloat16,trust_remote_code=True",
+            "--model_args", f"pretrained={eval_path},dtype=bfloat16,trust_remote_code=True",
             "--tasks", ",".join(self.config.eval_tasks),
             "--device", f"cuda:{self.config.gpu_ids[0]}",  # Primary device
             "--batch_size", str(self.config.eval_batch_size),

@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from typing import List, Tuple, Optional, Dict
 import math
+import logging
 
 
 class LowRankWrapper(nn.Module):
@@ -221,7 +222,9 @@ def initialize_from_experts(
     rank: int,
     num_steps: int = 1000,
     lr: float = 1e-3,
-    device: str = "cuda"
+    device: str = "cuda",
+    logger:Optional[logging.getLogger]=None,
+    layer_name: str = "",
 ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]]:
     """
     Zero-shot initialization of shared core + wrappers from original expert weights.
@@ -230,6 +233,8 @@ def initialize_from_experts(
     1. Initialize core as mean of all expert weights
     2. Initialize wrappers: U=0, V~N(0,1)
     3. Optimize to minimize ||W_e - W_hat_e||_F^2 using Adam
+
+    This implementation uses batched operations for efficiency.
 
     Args:
         expert_weights: List of expert weight tensors [num_experts, d_out, d_in]
@@ -242,67 +247,94 @@ def initialize_from_experts(
         core: Optimized shared core matrix
         wrappers: List of (U_in, V_in, U_out, V_out) tuples per expert
     """
-    expert_weights = [w.to(device) for w in expert_weights]
-    num_experts = len(expert_weights)
-    d_out, d_in = expert_weights[0].shape
+    # Stack expert weights into a single tensor [num_experts, d_out, d_in]
+    expert_weights_stacked = torch.stack([
+        w.to(device).detach().to(torch.float32)
+        for w in expert_weights
+    ])
+    num_experts, d_out, d_in = expert_weights_stacked.shape
 
     # Step 1: Initialize core as mean
-    core = torch.stack(expert_weights).mean(dim=0).clone().requires_grad_(True)
+    core = expert_weights_stacked.mean(dim=0).clone()
+    core.requires_grad_(True)
 
-    # Step 2: Initialize wrappers (LoRA-style)
-    wrappers = []
-    for _ in range(num_experts):
-        U_in = torch.zeros(d_in, rank, device=device, requires_grad=True)
-        V_in = torch.randn(d_in, rank, device=device, requires_grad=True) / math.sqrt(rank)
-        U_out = torch.zeros(d_out, rank, device=device, requires_grad=True)
-        V_out = torch.randn(d_out, rank, device=device, requires_grad=True) / math.sqrt(rank)
-        wrappers.append((U_in, V_in, U_out, V_out))
+    # Step 2: Initialize wrappers (LoRA-style) - batched across all experts
+    # Shape: [num_experts, d_in, rank]
+    U_in_batch = torch.zeros(num_experts, d_in, rank, device=device, dtype=torch.float32)
+    U_in_batch.requires_grad_(True)
+
+    V_in_batch = torch.randn(num_experts, d_in, rank, device=device, dtype=torch.float32) / math.sqrt(rank)
+    V_in_batch.requires_grad_(True)
+
+    # Shape: [num_experts, d_out, rank]
+    U_out_batch = torch.zeros(num_experts, d_out, rank, device=device, dtype=torch.float32)
+    U_out_batch.requires_grad_(True)
+
+    V_out_batch = torch.randn(num_experts, d_out, rank, device=device, dtype=torch.float32) / math.sqrt(rank)
+    V_out_batch.requires_grad_(True)
 
     # Collect all parameters for optimizer
-    params = [core]
-    for U_in, V_in, U_out, V_out in wrappers:
-        params.extend([U_in, V_in, U_out, V_out])
+    params = [core, U_in_batch, V_in_batch, U_out_batch, V_out_batch]
 
     # Step 3: Optimize with Adam
     optimizer = torch.optim.Adam(params, lr=lr)
 
+    # Pre-create identity matrices (reused across iterations)
+    I_in = torch.eye(d_in, device=device, dtype=torch.float32)  # [d_in, d_in]
+    I_out = torch.eye(d_out, device=device, dtype=torch.float32)  # [d_out, d_out]
+    
+    inital_loss = (expert_weights_stacked**2).sum().item() / num_experts
+
     for step in range(num_steps):
         optimizer.zero_grad()
 
-        # Compute reconstruction loss for all experts
-        total_loss = 0.0
-        for e, (W_e, (U_in, V_in, U_out, V_out)) in enumerate(zip(expert_weights, wrappers)):
-            # Reconstruct: W_hat_e = (I + U_out @ V_out^T) @ core @ (I + U_in @ V_in^T)
-            # Efficiently compute without materializing full matrices
+        # Batched reconstruction for all experts
+        # Input wrapper: (I + U_in @ V_in^T) for each expert
+        # Shape: [num_experts, d_in, rank] @ [num_experts, rank, d_in] -> [num_experts, d_in, d_in]
+        input_low_rank = torch.bmm(U_in_batch, V_in_batch.transpose(1, 2))  # [num_experts, d_in, d_in]
+        input_wrapped = I_in.unsqueeze(0) + input_low_rank  # [num_experts, d_in, d_in]
 
-            # Input wrapper application: (I + U_in @ V_in^T)
-            input_wrapped = torch.eye(d_in, device=device) + U_in @ V_in.T
+        # Apply core to all input-wrapped matrices
+        # core @ input_wrapped: [d_out, d_in] @ [num_experts, d_in, d_in]
+        # We need to broadcast: [num_experts, d_out, d_in] @ [num_experts, d_in, d_in]
+        core_expanded = core.unsqueeze(0).expand(num_experts, -1, -1)  # [num_experts, d_out, d_in]
+        temp = torch.bmm(core_expanded, input_wrapped)  # [num_experts, d_out, d_in]
 
-            # Core @ input_wrapped
-            temp = core @ input_wrapped
+        # Output wrapper: (I + U_out @ V_out^T) @ temp for each expert
+        # Shape: [num_experts, d_out, rank] @ [num_experts, rank, d_out] -> [num_experts, d_out, d_out]
+        output_low_rank = torch.bmm(U_out_batch, V_out_batch.transpose(1, 2))  # [num_experts, d_out, d_out]
+        output_wrapped = I_out.unsqueeze(0) + output_low_rank  # [num_experts, d_out, d_out]
 
-            # Output wrapper: (I + U_out @ V_out^T) @ temp
-            output_wrapped = torch.eye(d_out, device=device) + U_out @ V_out.T
-            W_hat_e = output_wrapped @ temp
+        # Final reconstruction: [num_experts, d_out, d_out] @ [num_experts, d_out, d_in]
+        W_hat = torch.bmm(output_wrapped, temp)  # [num_experts, d_out, d_in]
 
-            # L2 reconstruction loss
-            loss = torch.norm(W_e - W_hat_e, p='fro') ** 2
-            total_loss += loss
+        # Compute total reconstruction loss (batched Frobenius norm)
+        # ||W_e - W_hat_e||_F^2 for all experts
+        reconstruction_error = expert_weights_stacked - W_hat
+        total_loss = (reconstruction_error ** 2).sum()  # Sum over all elements
 
         # Backprop and step
         total_loss.backward()
         optimizer.step()
 
         # Logging
-        if step % 100 == 0 or step == num_steps - 1:
+        if step % 50 == 0 or step == num_steps - 1:
             avg_loss = total_loss.item() / num_experts
-            print(f"Step {step}/{num_steps}, Avg Reconstruction Loss: {avg_loss:.6f}")
-
-    # Detach and return
+            log_str = f"{layer_name} Step {step}/{num_steps}, Avg Reconstruction Loss: {avg_loss:.6f} relative recon loss: {avg_loss/inital_loss:.6f}"
+            if logger:
+                logger.info(log_str)
+            else:
+                print(log_str)  
+    # Detach and return as list of tuples (for backward compatibility)
     core_final = core.detach()
     wrappers_final = [
-        (U_in.detach(), V_in.detach(), U_out.detach(), V_out.detach())
-        for U_in, V_in, U_out, V_out in wrappers
+        (
+            U_in_batch[i].detach(),
+            V_in_batch[i].detach(),
+            U_out_batch[i].detach(),
+            V_out_batch[i].detach()
+        )
+        for i in range(num_experts)
     ]
 
     return core_final, wrappers_final

@@ -19,7 +19,7 @@ model:
 
 # Output directories
 output:
-  base_dir: "./models"
+  base_dir: "./models/${experiment_name}"
   compressed_dir: "${output.base_dir}/${model.name}/compressed"
   distilled_dir: "${output.base_dir}/${model.name}/distilled"
   eval_dir: "${output.base_dir}/${model.name}/evaluation"

@@ -209,6 +209,4 @@ def infer_num_active_experts(model_config) -> int:
     elif hasattr(model_config, 'top_k'):
         return model_config.top_k
     else:
-        # Default to 2 for most MoE models
-        logger.warning("Could not infer num_active_experts from config, defaulting to 2")
-        return 2
+        raise ValueError("Cannot infer number of active experts from model config.")

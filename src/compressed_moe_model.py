@@ -145,14 +145,15 @@ def load_compressed_model(
     Load a compressed MoE model from disk.
 
     This function:
-    1. Loads the original model architecture
-    2. Replaces MoE expert layers with compressed versions
+    1. Loads the original model architecture on CPU
+    2. Replaces MoE expert layers with compressed versions (on CPU)
     3. Loads compressed weights from disk
+    4. Moves the entire model to target device(s)
 
     Args:
         compressed_dir: Directory containing compressed weights
         original_model_name: Original HuggingFace model name
-        device_map: Device mapping for model parallelism
+        device_map: Device mapping for model parallelism ("auto", "cpu", or specific device)
         torch_dtype: Data type for model weights
 
     Returns:
@@ -168,19 +169,21 @@ def load_compressed_model(
     logger.info(f"Loading compressed model from {compressed_path}")
     logger.info(f"Original model: {original_model_name}")
 
-    # Load the original model architecture (without pretrained weights to save memory)
-    logger.info("Loading base model architecture...")
+    # Load the original model architecture on CPU first
+    # This avoids loading expert weights to GPU only to immediately discard them
+    logger.info("Loading base model architecture on CPU...")
     model = AutoModelForCausalLM.from_pretrained(
         original_model_name,
         torch_dtype=torch_dtype,
-        device_map=device_map,
+        device_map="cpu",
+        low_cpu_mem_usage=True,
         trust_remote_code=True
     )
 
     # Get model config
     model_config = model.config
 
-    # Replace expert layers with compressed versions
+    # Replace expert layers with compressed versions (all on CPU)
     projections = comp_config["projections"]
     rank = comp_config["rank"]
 
@@ -200,11 +203,11 @@ def load_compressed_model(
                 logger.warning(f"Missing {proj_path}, skipping")
                 continue
 
-            # Load compressed data
+            # Load compressed data (already on CPU)
             logger.info(f"  Loading {projection}...")
             data = torch.load(proj_path, map_location='cpu')
 
-            # Create SharedCoreLayer
+            # Create SharedCoreLayer on CPU
             metadata = data["metadata"]
             shared_layer = SharedCoreLayer(
                 num_experts=metadata["num_experts"],
@@ -224,8 +227,7 @@ def load_compressed_model(
 
             shared_core_layers[projection] = shared_layer
 
-        # Now we need to replace the layer in the model
-        # This is model-architecture specific
+        # Replace the layer in the model (on CPU)
         try:
             layer = model.model.layers[layer_idx]
 
@@ -236,7 +238,7 @@ def load_compressed_model(
                 num_experts = len(layer.mlp.experts)
                 num_experts_per_tok = getattr(model_config, 'num_experts_per_tok', 2)
 
-                # Create compressed MoE block
+                # Create compressed MoE block (on CPU)
                 compressed_block = CompressedMoEBlock(
                     gate=original_gate,
                     shared_core_layers=shared_core_layers,
@@ -244,11 +246,12 @@ def load_compressed_model(
                     num_experts_per_tok=num_experts_per_tok
                 )
 
-                # Replace the MLP
+                # Replace the MLP (no need to cast device - everything is on CPU)
                 layer.mlp = compressed_block
                 logger.info(f"  Replaced layer {layer_idx} MoE block")
 
             elif hasattr(layer, 'block_sparse_moe'):
+                raise NotImplementedError("Mixtral-style BlockSparseMoE replacement not implemented yet")
                 # Mixtral-style
                 original_gate = layer.block_sparse_moe.gate
                 num_experts = len(layer.block_sparse_moe.experts)
@@ -289,6 +292,45 @@ def load_compressed_model(
         logger.info(f"Loaded {len(non_moe_state_dict)} non-MoE parameters")
     else:
         logger.warning("No non_moe_weights.pt found - model may be missing attention, norms, etc!")
+
+    # Now move the entire model to the target device(s)
+    if device_map != "cpu":
+        logger.info(f"Moving model to device_map: {device_map}")
+        try:
+            from accelerate import dispatch_model, infer_auto_device_map
+
+            # Build no_split_module_classes list
+            # Include original model's no-split modules plus our custom CompressedMoEBlock
+            no_split_modules = []
+            if hasattr(model, '_no_split_modules'):
+                no_split_modules.extend(model._no_split_modules)
+
+            # Add our custom CompressedMoEBlock to prevent splitting compressed experts
+            no_split_modules.append("CompressedMoEBlock")
+
+            # Remove duplicates while preserving order
+            no_split_modules = list(dict.fromkeys(no_split_modules))
+
+            # Infer device map based on available memory
+            device_map_dict = infer_auto_device_map(
+                model,
+                max_memory=None,
+                dtype=torch_dtype,
+                no_split_module_classes=no_split_modules
+            )
+
+            # Dispatch model to devices
+            model = dispatch_model(model, device_map=device_map_dict)
+            logger.info("Model successfully dispatched to devices")
+        except ImportError:
+            logger.warning("accelerate library not available, moving to single device")
+            # Fallback: move to single device if accelerate is not available
+            if device_map == "auto":
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            else:
+                device = device_map
+            model = model.to(device)
+            logger.info(f"Model moved to {device}")
 
     logger.info("Compressed model loaded successfully!")
     return model

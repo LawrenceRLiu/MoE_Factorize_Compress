@@ -18,6 +18,7 @@ import os
 import traceback
 from queue import Empty
 from threading import Lock
+import shutil
 
 from .shared_core import initialize_from_experts, SharedCoreLayer
 from .compression_stats import CompressionStats, infer_num_active_experts
@@ -582,6 +583,11 @@ def parallel_compression(
     logger.info(f"Failed: {failed_tasks}/{total_tasks}")
     logger.info(f"Results saved to: {output_dir}")
     logger.info("="*60)
+    
+    #clear the extraction directory
+    if extraction_dir.exists():
+        shutil.rmtree(extraction_dir)
+        logger.info(f"Cleaned up extraction directory: {extraction_dir}")
 
     # Collect and save compression statistics
     logger.info("\nCollecting compression statistics...")
@@ -615,74 +621,3 @@ def parallel_compression(
         "failed": failed_tasks,
         "results": results
     }
-
-
-def load_compressed_model(
-    original_model,
-    compressed_dir: str,
-    device: str = "cuda"
-):
-    """
-    Load compressed weights into a model with SharedCoreLayer modules.
-
-    This function replaces the original MoE expert layers with compressed versions.
-
-    Args:
-        original_model: The original model to modify
-        compressed_dir: Directory containing compressed weights
-        device: Device to load weights onto
-
-    Returns:
-        Model with compressed layers
-    """
-    compressed_path = Path(compressed_dir)
-
-    # Load compression config
-    config_path = compressed_path / "compression_config.json"
-    with open(config_path, 'r') as f:
-        comp_config = json.load(f)
-
-    projections = comp_config["projections"]
-    rank = comp_config["rank"]
-
-    # Iterate through layers and load compressed weights
-    layer_dirs = sorted(compressed_path.glob("layer_*"))
-
-    for layer_dir in layer_dirs:
-        layer_idx = int(layer_dir.name.split("_")[1])
-        logger.info(f"Loading compressed layer {layer_idx}")
-
-        # Load each projection
-        for projection in projections:
-            proj_path = layer_dir / f"{projection}.pt"
-            if not proj_path.exists():
-                logger.warning(f"Missing {proj_path}, skipping")
-                continue
-
-            # Load compressed data
-            data = torch.load(proj_path, map_location=device)
-
-            # Create SharedCoreLayer
-            metadata = data["metadata"]
-            shared_layer = SharedCoreLayer(
-                num_experts=metadata["num_experts"],
-                d_in=metadata["d_in"],
-                d_out=metadata["d_out"],
-                rank=rank,
-                init_core=data["core"].to(device)
-            )
-
-            # Load wrapper parameters
-            for expert_idx, wrapper_data in enumerate(data["wrappers"]):
-                expert = shared_layer.get_expert(expert_idx)
-                expert.input_wrapper.U.data = wrapper_data["U_in"].to(device)
-                expert.input_wrapper.V.data = wrapper_data["V_in"].to(device)
-                expert.output_wrapper.U.data = wrapper_data["U_out"].to(device)
-                expert.output_wrapper.V.data = wrapper_data["V_out"].to(device)
-
-            # TODO: Replace the projection in the original model
-            # This requires modifying the model architecture
-            # For now, just store the compressed layer
-            logger.info(f"  Loaded {projection}: {shared_layer.count_parameters()}")
-
-    return original_model

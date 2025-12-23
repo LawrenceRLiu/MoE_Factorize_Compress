@@ -6,7 +6,7 @@ defaults:
   - _self_
 
 # Experiment tracking
-experiment_name: "moe_compression_experiment"
+experiment_name: "experiment"
 wandb_project: "moe-compression"
 
 # Device configuration
@@ -19,10 +19,10 @@ model:
 
 # Output directories
 output:
-  base_dir: "./models/${experiment_name}"
-  compressed_dir: "${output.base_dir}/${model.name}/compressed"
-  distilled_dir: "${output.base_dir}/${model.name}/distilled"
-  eval_dir: "${output.base_dir}/${model.name}/evaluation"
-
+  base_dir: "./models/${model.name}/${experiment_name}"
+  config_dir: "${output.base_dir}"
+  checkpoints_dir: "${output.base_dir}/checkpoints" #we expect the checkpoints here to be of the form 'checkpoint-<step>' with the zero-shot init being saved as 'checkpoint-0'
+  eval_dir: "${output.base_dir}/evals" # Evaluation results, we expect the evals of each checkpoint to be saved here
+  temp_dir: "${output.base_dir}/tmp" #to store temp files
 # Random seed for reproducibility
 seed: 42

@@ -4,15 +4,17 @@ Asynchronous Checkpoint Evaluation
 Monitors checkpoint directory and evaluates new checkpoints using lm_eval harness.
 """
 
+import os
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from pathlib import Path
 import json
 import time
 import logging
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Union
 from dataclasses import dataclass, asdict
 import wandb
+import sys
 import subprocess
 
 from .compressed_moe_model import , export_to_hf_format
@@ -22,14 +24,80 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def evaluate_single_task(
+    checkpoint_path: Union[str, Path],
+    task_name: str,
+    num_fewshot: int,
+    save_path: Union[str, Path],
+    gpu_ids: List[int],
+    n_gpus_per_model: int = 1,
+    batch_size: Union[int, str] = "auto",
+):
+    """
+    Evaluate a single task using lm-evaluation-harness.
+    
+    Saves the results to the specified path for later analysis.
+
+    Args:
+        checkpoint_path: Path to model checkpoint (HuggingFace format)
+        task_name: Name of the evaluation task
+        num_fewshot: Number of few-shot examples
+        save_path: Path to save evaluation results
+        gpu_ids: List of GPU IDs to use
+        n_gpus_per_model: Number of GPUs to allocate per model, 
+        if this is less than the number of gpus, we will parallelize across multiple gpus
+        batch_size: Batch size for evaluation ("auto" or int)
+    """
+    
+    #checking to see if the the number of gpus required to run the model is less than the number of gpus available
+    assert n_gpus_per_model <= len(gpu_ids), \
+        "Number of gpus per model cannot be greater than the number of gpus available"
+    
+    #set the environment variable to use the specified gpus
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in gpu_ids[:(len(gpu_ids)//n_gpus_per_model)*n_gpus_per_model])
+    
+    cmd = [
+        "lm_eval",
+        "--model", "hf",
+        "--model_args", f"pretrained={checkpoint_path},dtype=bfloat16,trust_remote_code=True,parallelize={n_gpus_per_model > 1}",
+        "--tasks", task_name,
+        "--num_fewshot", str(num_fewshot),
+        "--output_path", str(save_path),
+    ]
+    
+    if len(gpu_ids)//n_gpus_per_model > 1:
+        #we parallelize across multiple gpus
+        prefix = [
+             sys.executable,
+             "-m", 
+             "accelerate.commands.launch",
+             "--multi_gpu",
+             "--num_processes", str(len(gpu_ids)//n_gpus_per_model),
+             "-m",
+        ]
+    else:
+        prefix = [sys.executable, "-m"]
+    cmd = prefix + cmd
+    if batch_size != "auto":
+        cmd += ["--batch_size", str(batch_size)]
+        
+    logger.info(f"Running command: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True, env=env)
+        
+        
+
+
 @dataclass
 class EvalConfig:
     """Configuration for async evaluation."""
     checkpoint_dir: str
+    config_dir: str
+    temp_dir: str
+    eval_dir: str
     original_model_name: str  # Needed for export
     eval_tasks: List[str]
     gpu_ids: List[int]  # GPUs to use for evaluation
-    eval_batch_size: int = 8
     eval_interval: int = 60  # Seconds between checks
     wandb_project: str = "moe-compression"
     wandb_run_name: Optional[str] = None

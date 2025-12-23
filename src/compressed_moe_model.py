@@ -14,6 +14,7 @@ from pathlib import Path
 import json
 import logging
 from typing import Optional, Dict, Tuple, List
+from omegaconf import OmegaConf
 
 from .shared_core import SharedCoreLayer, CompressedExpert
 
@@ -139,7 +140,8 @@ def load_compressed_model(
     compressed_dir: str,
     original_model_name: str,
     device_map: str = "auto",
-    torch_dtype: torch.dtype = torch.bfloat16
+    torch_dtype: torch.dtype = torch.bfloat16,
+    config_path: Optional[str] = None
 ) -> nn.Module:
     """
     Load a compressed MoE model from disk.
@@ -155,6 +157,7 @@ def load_compressed_model(
         original_model_name: Original HuggingFace model name
         device_map: Device mapping for model parallelism ("auto", "cpu", or specific device)
         torch_dtype: Data type for model weights
+        config_path: Optional path to compression config, if not provided assumes its located in the parent directory of compressed_dir
 
     Returns:
         Model with compressed MoE layers
@@ -162,9 +165,13 @@ def load_compressed_model(
     compressed_path = Path(compressed_dir)
 
     # Load compression config
-    config_path = compressed_path / "compression_config.json"
+    if config_path is None:
+        config_path = compressed_path.parent / "compression_config.yaml"
+    else:
+        config_path = Path(config_path)
+
     with open(config_path, 'r') as f:
-        comp_config = json.load(f)
+        comp_config = OmegaConf.load(f)
 
     logger.info(f"Loading compressed model from {compressed_path}")
     logger.info(f"Original model: {original_model_name}")
@@ -187,6 +194,7 @@ def load_compressed_model(
     projections = comp_config["projections"]
     rank = comp_config["rank"]
 
+    logger.info(f"searching {compressed_path} for compressed layers...")
     layer_dirs = sorted(compressed_path.glob("layer_*"))
     logger.info(f"Found {len(layer_dirs)} compressed layers")
 
@@ -356,7 +364,7 @@ def save_compressed_model(
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-
+    logger.info("="*10 + " Saving Compressed Model " + "="*10)
     logger.info(f"Saving compressed model to {output_path}")
 
     # Save model config
@@ -386,6 +394,7 @@ def save_compressed_model(
     for name, buffer in model.named_buffers():
         if 'shared_core_layers' not in name:
             non_moe_state_dict[name] = buffer.detach().cpu()
+            logger.info(f"Saved to non_moe: {name}")
 
     # Save non-MoE parameters
     logger.info(f"Saving {len(non_moe_state_dict)} non-MoE parameters...")
@@ -452,6 +461,7 @@ def save_compressed_model(
     logger.info(f"Saved {layer_count} compressed MoE layers")
     logger.info(f"Saved {len(non_moe_state_dict)} non-MoE parameters")
     logger.info(f"Model saved to {output_path}")
+    logger.info("="*10 + " Save Complete " + "="*10)
 
 
 def export_to_hf_format(

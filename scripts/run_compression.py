@@ -47,8 +47,9 @@ def main(cfg: DictConfig):
         rank=cfg.compression.rank,
         num_steps=cfg.compression.num_steps,
         lr=cfg.compression.lr,
-        output_dir=cfg.output.compressed_dir,
-        projections=cfg.compression.projections
+        output_dir=cfg.output.checkpoints_dir,
+        config_dir=cfg.output.config_dir,
+        projections=cfg.compression.projections,
     )
 
     logger.info("\nCompression Configuration:")

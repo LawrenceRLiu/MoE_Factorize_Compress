@@ -10,7 +10,7 @@ dataset:
 # Teacher model configuration
 teacher:
   # Teacher is the original uncompressed model
-  load_in_8bit: true  # Quantize teacher to save VRAM
+  load_in_8bit: false  # Quantize teacher to save VRAM
   load_in_4bit: false  # Use 4-bit if even more VRAM saving needed
 
 # Distillation hyperparameters

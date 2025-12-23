@@ -18,6 +18,7 @@ import os
 import traceback
 from queue import Empty
 from threading import Lock
+from omegaconf import OmegaConf
 import shutil
 
 from .shared_core import initialize_from_experts, SharedCoreLayer
@@ -36,6 +37,7 @@ class CompressionConfig:
     num_steps: int = 1000
     lr: float = 1e-3
     output_dir: str = "./models/compressed"
+    config_dir: str = "./models/compressed/config"
     projections: List[str] = None  # e.g., ["gate_proj", "up_proj", "down_proj"]
 
     def __post_init__(self):
@@ -446,15 +448,15 @@ def parallel_compression(
     logger.info(f"Model uses {num_active_experts} active experts per token")
 
     # Create output directory
+    #add a `checkpoint-0` suffix to indicate zero-shot init
+    config.output_dir = os.path.join(config.output_dir, "checkpoint-0")
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save compression config
-    config_path = output_dir / "compression_config.yaml"
-    with open(config_path, 'w') as f:
-        yaml_content = asdict(config)
-        yaml_content["output_dir"] = str(output_dir)
-        yaml.dump(yaml_content, f)
+    config_path = Path(config.config_dir) / "compression_config.yaml"
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    OmegaConf.save(config=OmegaConf.structured(config), f=config_path)
 
     logger.info(f"Saved compression config to {config_path}")
 
@@ -588,31 +590,6 @@ def parallel_compression(
     if extraction_dir.exists():
         shutil.rmtree(extraction_dir)
         logger.info(f"Cleaned up extraction directory: {extraction_dir}")
-
-    # Collect and save compression statistics
-    logger.info("\nCollecting compression statistics...")
-    stats = CompressionStats()
-
-    for layer_idx in range(num_layers):
-        layer_dir = output_dir / f"layer_{layer_idx}"
-        for projection in config.projections:
-            metadata_path = layer_dir / f"{projection}_metadata.json"
-            if metadata_path.exists():
-                with open(metadata_path, 'r') as f:
-                    metadata = json.load(f)
-                stats.add_layer_stats(
-                    layer_idx=layer_idx,
-                    projection=projection,
-                    num_experts=metadata["num_experts"],
-                    d_in=metadata["d_in"],
-                    d_out=metadata["d_out"],
-                    rank=metadata["rank"],
-                    num_active_experts=num_active_experts
-                )
-
-    # Save aggregate statistics
-    stats.save(output_dir / "compression_statistics.yaml")
-    logger.info("Compression statistics saved!")
 
     # Return summary
     return {

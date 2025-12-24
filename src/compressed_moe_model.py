@@ -206,6 +206,7 @@ def load_compressed_model(
         shared_core_layers = {}
 
         for projection in projections:
+            
             proj_path = layer_dir / f"{projection}.pt"
             if not proj_path.exists():
                 logger.warning(f"Missing {proj_path}, skipping")
@@ -222,7 +223,8 @@ def load_compressed_model(
                 d_in=metadata["d_in"],
                 d_out=metadata["d_out"],
                 rank=rank,
-                init_core=data["core"]
+                init_core=data["core"],
+                bias="biases" in data
             )
 
             # Load wrapper parameters
@@ -232,6 +234,8 @@ def load_compressed_model(
                 expert.input_wrapper.V.data = wrapper_data["V_in"]
                 expert.output_wrapper.U.data = wrapper_data["U_out"]
                 expert.output_wrapper.V.data = wrapper_data["V_out"]
+                if "biases" in data:
+                    expert.bias.data = data["biases"][expert_idx]
 
             shared_core_layers[projection] = shared_layer
 
@@ -548,6 +552,9 @@ def export_to_hf_format(
                             device=original_expert_proj.weight.device,
                             dtype=original_expert_proj.weight.dtype
                         )
+                        # TODO: handle bias if needed
+                    else:
+                        raise ValueError(f"Original expert missing projection {proj_name}")
 
             # Replace compressed block with materialized original structure
             setattr(layer, target_attr, original_moe)
@@ -562,6 +569,7 @@ def export_to_hf_format(
     for name in original_state.keys():
         # Skip expert weights (already materialized)
         if 'experts.' in name and ('.mlp.' in name or '.block_sparse_moe.' in name):
+            logger.info(f"  Skipping expert weights: {name}")
             continue
 
         # Copy from compressed model if available

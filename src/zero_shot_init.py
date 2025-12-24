@@ -45,140 +45,6 @@ class CompressionConfig:
             self.projections = ["gate_proj", "up_proj", "down_proj"]
 
 
-class MoELayerCompressor:
-    """
-    Handles compression of a single MoE layer's projections.
-
-    Args:
-        model_name: HuggingFace model identifier
-        layer_idx: Index of the layer to compress
-        rank: Rank for low-rank adapters
-        config: Compression configuration
-    """
-
-    def __init__(
-        self,
-        model_name: str,
-        layer_idx: int,
-        rank: int,
-        config: CompressionConfig
-    ):
-        self.model_name = model_name
-        self.layer_idx = layer_idx
-        self.rank = rank
-        self.config = config
-
-    def extract_expert_weights(
-        self,
-        model,
-        layer_idx: int,
-        projection: str
-    ) -> Tuple[List[torch.Tensor], int, int]:
-        """
-        Extract expert weights for a specific projection from a layer.
-
-        Args:
-            model: The loaded MoE model
-            layer_idx: Layer index
-            projection: Projection name (e.g., "gate_proj")
-
-        Returns:
-            expert_weights: List of weight tensors
-            d_out: Output dimension
-            d_in: Input dimension
-        """
-        # Navigate to the MoE layer
-        # This assumes Qwen/Mixtral style MoE structure
-        # Adjust path based on actual model architecture
-        try:
-            # Try Qwen-MoE structure
-            layer = model.model.layers[layer_idx]
-            if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'experts'):
-                experts = layer.mlp.experts
-            elif hasattr(layer, 'block_sparse_moe') and hasattr(layer.block_sparse_moe, 'experts'):
-                # Mixtral-style
-                experts = layer.block_sparse_moe.experts
-            else:
-                raise AttributeError("Could not locate experts in layer")
-
-            # Extract weights from each expert
-            expert_weights = []
-            for expert in experts:
-                if hasattr(expert, projection):
-                    weight = getattr(expert, projection).weight.data.clone()
-                    expert_weights.append(weight)
-                else:
-                    raise AttributeError(f"Expert does not have projection: {projection}")
-
-            if not expert_weights:
-                raise ValueError(f"No expert weights extracted for layer {layer_idx}, projection {projection}")
-
-            d_out, d_in = expert_weights[0].shape
-            logger.info(f"Extracted {len(expert_weights)} experts, shape: ({d_out}, {d_in})")
-
-            return expert_weights, d_out, d_in
-
-        except Exception as e:
-            logger.error(f"Failed to extract weights: {e}")
-            raise
-
-    def compress_projection(
-        self,
-        model,
-        projection: str,
-        device: str = "cuda"
-    ) -> Dict:
-        """
-        Compress a single projection (e.g., gate_proj) of a layer.
-
-        Args:
-            model: The loaded MoE model
-            projection: Projection name
-            device: Device to run compression on
-
-        Returns:
-            Dictionary containing compressed weights and metadata
-        """
-        logger.info(f"Compressing layer {self.layer_idx}, projection {projection}")
-
-        # Extract expert weights
-        expert_weights, d_out, d_in = self.extract_expert_weights(
-            model, self.layer_idx, projection
-        )
-
-        # Run zero-shot initialization
-        core, wrappers = initialize_from_experts(
-            expert_weights=expert_weights,
-            rank=self.rank,
-            num_steps=self.config.num_steps,
-            lr=self.config.lr,
-            device=device
-        )
-
-        # Package results
-        result = {
-            "layer_idx": self.layer_idx,
-            "projection": projection,
-            "core": core.cpu(),
-            "wrappers": [
-                {
-                    "U_in": U_in.cpu(),
-                    "V_in": V_in.cpu(),
-                    "U_out": U_out.cpu(),
-                    "V_out": V_out.cpu()
-                }
-                for U_in, V_in, U_out, V_out in wrappers
-            ],
-            "metadata": {
-                "num_experts": len(expert_weights),
-                "d_in": d_in,
-                "d_out": d_out,
-                "rank": self.rank
-            }
-        }
-
-        return result
-
 
 def extract_all_expert_weights(
     model_name: str,
@@ -236,20 +102,30 @@ def extract_all_expert_weights(
                 continue
             # Extract expert weights for this projection
             expert_weights = []
+            expert_biases = []
             for expert in experts:
                 if hasattr(expert, projection):
                     weight = getattr(expert, projection).weight.data.cpu().clone()
+                    bias = getattr(expert, projection).bias.data.cpu().clone() if getattr(expert, projection).bias is not None else None
                     expert_weights.append(weight)
+                    expert_biases.append(bias)
                 else:
                     raise AttributeError(f"Expert does not have projection: {projection}")
 
-            # Save to disk
-            torch.save({
+            data = {
                 "expert_weights": expert_weights,
                 "num_experts": len(expert_weights),
                 "d_out": expert_weights[0].shape[0],
                 "d_in": expert_weights[0].shape[1]
-            }, save_path)
+            }
+            
+            if any(b is not None for b in expert_biases):
+                #check that they are all present
+                if not all(b is not None for b in expert_biases):
+                    raise ValueError(f"Some experts are missing biases for projection {projection} in layer {layer_idx}")
+                data["expert_biases"] = expert_biases
+            # Save to disk
+            torch.save(data, save_path)
 
             logger.info(f"  Saved {projection}: {len(expert_weights)} experts, shape {expert_weights[0].shape}")
 
@@ -314,7 +190,7 @@ def compression_worker(
 
                 weight_data = torch.load(weight_path, map_location="cpu")
                 expert_weights = weight_data["expert_weights"]
-
+                expert_biases = weight_data.get("expert_biases", None) #shape of (num_experts, d_out) if present
                 # Run zero-shot initialization
                 core, wrappers = initialize_from_experts(
                     expert_weights=expert_weights,
@@ -347,6 +223,10 @@ def compression_worker(
                         "rank": config.rank
                     }
                 }
+                
+                #add the biases if available
+                if expert_biases is not None:
+                    result["biases"] = [b.cpu() for b in expert_biases]
 
                 # Save result
                 output_dir = Path(config.output_dir) / f"layer_{layer_idx}"

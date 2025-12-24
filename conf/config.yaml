@@ -1,6 +1,6 @@
 # Main configuration file for MoE Compression
 defaults:
-  - compression: qwen_3_30b
+  - compression: default
   - distillation: default
   - evaluation: default
   - _self_

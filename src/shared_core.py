@@ -72,7 +72,8 @@ class CompressedExpert(nn.Module):
         rank: Rank for low-rank adapters
     """
 
-    def __init__(self, core: torch.Tensor, d_in: int, d_out: int, rank: int):
+    def __init__(self, core: torch.Tensor, d_in: int, d_out: int, rank: int,
+                 bias: bool = True):
         super().__init__()
         self.d_in = d_in
         self.d_out = d_out
@@ -84,6 +85,11 @@ class CompressedExpert(nn.Module):
         # Input and output low-rank wrappers
         self.input_wrapper = LowRankWrapper(d_in, rank, init_zeros=True)
         self.output_wrapper = LowRankWrapper(d_out, rank, init_zeros=True)
+        
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(d_out))
+        else:
+            self.bias = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -103,7 +109,8 @@ class CompressedExpert(nn.Module):
 
         # Apply output wrapper: (I + U_out @ V_out^T) @ x
         x = self.output_wrapper(x)
-
+        if self.bias is not None:
+            x = x + self.bias
         return x
 
     def reconstruct_weight(self) -> torch.Tensor:
@@ -142,7 +149,8 @@ class SharedCoreLayer(nn.Module):
         d_in: int,
         d_out: int,
         rank: int,
-        init_core: Optional[torch.Tensor] = None
+        init_core: Optional[torch.Tensor] = None,
+        bias: bool = True
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -161,9 +169,10 @@ class SharedCoreLayer(nn.Module):
 
         # Create compressed experts (they will share the core buffer)
         self.experts = nn.ModuleList([
-            CompressedExpert(self.core, d_in, d_out, rank)
+            CompressedExpert(self.core, d_in, d_out, rank, bias=bias)
             for _ in range(num_experts)
         ])
+        self.has_bias = bias
 
     def forward(self, hidden_states: torch.Tensor, expert_idx: int) -> torch.Tensor:
         """
@@ -195,16 +204,20 @@ class SharedCoreLayer(nn.Module):
         # Wrapper parameters per expert: 2 * (U + V) = 2 * (dim * rank + dim * rank)
         input_wrapper_per_expert = 2 * self.d_in * self.rank
         output_wrapper_per_expert = 2 * self.d_out * self.rank
-        wrapper_params_per_expert = input_wrapper_per_expert + output_wrapper_per_expert
+        wrapper_params_per_expert = input_wrapper_per_expert + output_wrapper_per_expert + self.d_out * self.has_bias  # include bias
 
         # Total wrapper parameters
         total_wrapper_params = wrapper_params_per_expert * self.num_experts
 
         # Total parameters
         total_params = core_params + total_wrapper_params
+        
+        # Double check vs actual count
+        actual_count = sum(p.numel() for p in self.parameters())
+        assert total_params == actual_count, f"Parameter count mismatch: calculated {total_params}, actual {actual_count}"
 
         # Original uncompressed parameters (for comparison)
-        original_params = self.num_experts * self.d_in * self.d_out
+        original_params = self.num_experts * (self.d_in + self.has_bias) * self.d_out
 
         return {
             "core_params": core_params,

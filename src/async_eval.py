@@ -5,6 +5,7 @@ Monitors checkpoint directory and evaluates new checkpoints using lm_eval harnes
 """
 
 import os
+from omegaconf import OmegaConf
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from pathlib import Path
@@ -17,7 +18,7 @@ import wandb
 import sys
 import subprocess
 
-from .compressed_moe_model import , export_to_hf_format
+from .compressed_moe_model import load_compressed_model, export_to_hf_format
 
 
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +42,7 @@ def evaluate_single_task(
     Args:
         checkpoint_path: Path to model checkpoint (HuggingFace format)
         task_name: Name of the evaluation task
-        num_fewshot: Number of few-shot examples
+        num_fewshot: Number of few-shot examples, -1 for perplexity evaluation
         save_path: Path to save evaluation results
         gpu_ids: List of GPU IDs to use
         n_gpus_per_model: Number of GPUs to allocate per model, 
@@ -62,9 +63,12 @@ def evaluate_single_task(
         "--model", "hf",
         "--model_args", f"pretrained={checkpoint_path},dtype=bfloat16,trust_remote_code=True,parallelize={n_gpus_per_model > 1}",
         "--tasks", task_name,
-        "--num_fewshot", str(num_fewshot),
         "--output_path", str(save_path),
     ]
+    if num_fewshot >= 0:
+        cmd += ["--num_fewshot", str(num_fewshot)]
+    else:
+        logger.info("Using perplexity evaluation (num_fewshot < 0)")
     
     if len(gpu_ids)//n_gpus_per_model > 1:
         #we parallelize across multiple gpus
@@ -92,21 +96,35 @@ def evaluate_single_task(
 class EvalConfig:
     """Configuration for async evaluation."""
     checkpoint_dir: str
-    config_dir: str
     temp_dir: str
     eval_dir: str
-    original_model_name: str  # Needed for export
     eval_tasks: List[str]
-    gpu_ids: List[int]  # GPUs to use for evaluation
+    fewshots: List[int]
+    config_dir: Optional[str] = None
+    batch_size: Union[int, str] = "auto"  # Batch size for evaluation
+    gpu_ids: List[int] = None  # GPUs to use for evaluation
+    n_gpus_per_model: int = 1  # GPUs per model for parallelization
     eval_interval: int = 60  # Seconds between checks
-    wandb_project: str = "moe-compression"
-    wandb_run_name: Optional[str] = None
-    num_fewshot: int = 0
-    limit: Optional[int] = None  # Limit samples per task (for testing)
-    use_export: bool = True  # Export to HF format before eval (recommended)
+    
+    def __post_init__(self):
+        # Ensure directories exist
+        self.checkpoint_dir = Path(self.checkpoint_dir)
+        self.temp_dir = Path(self.temp_dir)
+        self.eval_dir = Path(self.eval_dir)
+        
+        if self.config_dir:
+            self.config_dir = Path(self.config_dir)
+        else:
+            self.config_dir = self.checkpoint_dir.parent / "compression_config.yaml"
+            
+        with open(self.config_dir, 'r') as f:
+            comp_config = OmegaConf.load(f)
+        self.original_model_name = comp_config.model_name
+        
+        
 
 
-class CheckpointEvaluator:
+class Evaluator:
     """
     Evaluates model checkpoints using lm-evaluation-harness.
 
@@ -115,21 +133,101 @@ class CheckpointEvaluator:
 
     def __init__(self, config: EvalConfig):
         self.config = config
-        self.checkpoint_dir = Path(config.checkpoint_dir)
-        self.evaluated_checkpoints: Set[str] = set()
-        self.results_file = self.checkpoint_dir / "evaluation_results.json"
-        self.evaluated_file = self.checkpoint_dir / ".evaluated_checkpoints"
-
-        # Load previously evaluated checkpoints
-        self._load_evaluated_state()
-
-        # Initialize wandb if specified
-        if config.wandb_run_name:
-            wandb.init(
-                project=config.wandb_project,
-                name=config.wandb_run_name,
-                config=asdict(config)
+        #TODO:: Wandb integration
+        
+    def _evaluate(self, model_path: Optional[Path] = None) -> Dict:
+        
+        if model_path is None:
+            #then we evaluate the original model
+            model_path = self.config.original_model_name
+            results_path = self.config.eval_dir / "baseline_eval"
+        else:
+            #we expect the model_path to be a path to the temporary full hf model
+            #replace the temp dir with eval dir
+            relative_path = model_path.relative_to(self.config.temp_dir) #something along the lines of checkpoint-0
+            results_path = self.config.eval_dir / relative_path / "eval_results"
+            
+            #TODO: Check this at a later point
+            
+        results_path.mkdir(parents=True, exist_ok=True)
+        out = {}
+        
+        for task, fewshot in zip(self.config.eval_tasks, self.config.fewshots):
+            logger.info(f"Evaluating task: {task} with {fewshot} few-shots")
+            evaluate_single_task(
+                checkpoint_path=model_path,
+                task_name=task,
+                num_fewshot=fewshot,
+                save_path=results_path / "{task}_fewshot_{fewshot}.json",
+                gpu_ids=self.config.gpu_ids,
+                n_gpus_per_model=self.config.n_gpus_per_model,
+                batch_size=self.config.batch_size
             )
+            #load the results
+            with open(results_path / f"{task}_fewshot_{fewshot}.json", 'r') as f:
+                task_results = json.load(f)
+            out[f"{task}_fewshot_{fewshot}"] = task_results
+            
+            #TODO: log to wandb if needed
+            
+        logger.info(f"Completed evaluation for model: {model_path}")
+        logger.info(f"Results: {out}")
+        return out
+    
+    def evaluate_baseline(self) -> Dict:
+        """
+        Evaluate the baseline (original) model.
+
+        Returns:
+            Evaluation results
+        """
+        logger.info("Evaluating baseline model")
+        return self._evaluate(model_path=None)
+    
+    def evaluate_checkpoint(self, checkpoint_path: Path) -> Dict:
+        """
+        Evaluate a single checkpoint.
+
+        Args:
+            checkpoint_path: Path to checkpoint directory, expected to be of the form 
+            {checkpoint_dir}/checkpoint-*
+
+        Returns:
+            Evaluation results
+        """
+        logger.info(f"Evaluating checkpoint: {checkpoint_path}")
+
+        # Check if this is a compressed model (has compression_config.json)
+        eval_path = checkpoint_path
+        if (checkpoint_path / "compression_config.json").exists():
+            logger.info("Detected compressed model, exporting to HF format for evaluation...")
+
+            export_path = self.config.temp_dir / checkpoint_path.name / "exported_for_eval"
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Only export if not already done
+            if not export_path.exists():
+                try:
+                    export_to_hf_format(
+                        compressed_model_path=str(checkpoint_path),
+                        original_model_name=self.config.original_model_name,
+                        output_path=str(export_path),
+                        device_map=f"cuda:{self.config.gpu_ids[0]}",  # Use eval GPU
+                        torch_dtype=torch.bfloat16
+                    )
+                    eval_path = export_path
+                    logger.info(f"Export complete, will evaluate: {eval_path}")
+                except Exception as e:
+                    logger.error(f"Export failed: {e}", exc_info=True)
+                    logger.warning("Will try to evaluate compressed model directly (may fail)")
+            else:
+                logger.info(f"Using existing export: {export_path}")
+                eval_path = export_path
+
+        return self._evaluate(model_path=eval_path)
+            
+            
+                  
 
     def _load_evaluated_state(self):
         """Load the set of already evaluated checkpoints."""

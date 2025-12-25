@@ -66,7 +66,7 @@ def extract_all_expert_weights(
     # Load model
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map={"": device},
         trust_remote_code=True
     )

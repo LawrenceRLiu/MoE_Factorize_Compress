@@ -56,7 +56,8 @@ class LowRankWrapper(nn.Module):
 
     def as_matrix(self) -> torch.Tensor:
         """Return the full (I + U @ V^T) matrix for analysis."""
-        return torch.eye(self.dim, device=self.U.device) + self.U @ self.V.T
+        # print(f"self.U dtype: {self.U.dtype}, self.V dtype: {self.V.dtype}")
+        return torch.eye(self.dim, device=self.U.device, dtype=self.U.dtype) + self.U @ self.V.T
 
 
 class CompressedExpert(nn.Module):
@@ -112,6 +113,26 @@ class CompressedExpert(nn.Module):
         if self.bias is not None:
             x = x + self.bias
         return x
+    
+    def reconstruct(self, core: torch.Tensor) -> torch.Tensor:
+        """
+        Reconstruct the full weight matrix of this expert.
+
+        Args:
+            core: Shared core weight matrix of shape [d_out, d_in]
+
+        Returns:
+            Reconstructed weight matrix of shape [d_out, d_in]
+        """
+        # Get full wrapper matrices
+        
+        input_matrix = self.input_wrapper.as_matrix()  # [d_in, d_in]
+        output_matrix = self.output_wrapper.as_matrix()  # [d_out, d_out]
+        
+        # print(f"Core dtype: {core.dtype}, input_matrix dtype: {input_matrix.dtype}, output_matrix dtype: {output_matrix.dtype}")
+        # Full reconstruction: W_hat = (I + U_out @ V_out^T) @ C @ (I + U_in @ V_in^T)
+        W_hat = output_matrix @ core @ input_matrix  # [d_out, d_in]
+        return W_hat
 
 
 class SharedCoreLayer(nn.Module):
@@ -216,6 +237,17 @@ class SharedCoreLayer(nn.Module):
             "reduction_percentage": (1 - total_params / original_params) * 100
         }
 
+    def reconstruct_experts(self) -> List[torch.Tensor]:
+        """
+        Reconstruct full weight matrices for all experts.
+
+        Returns:
+            List of reconstructed weight matrices [num_experts] each of shape [d_out, d_in]
+        """
+        return [
+            expert.reconstruct(self.core)
+            for expert in self.experts
+        ]
 
 def initialize_from_experts(
     expert_weights: List[torch.Tensor],

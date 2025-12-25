@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, Union
 import json
+import gc
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,36 @@ def human_readable(num: Union[int, float], decimals=2)-> str:
 
     return f"{num:.{decimals}f}{suffixes[idx]}"
 
+
+def clean():
+    """Clean up GPU memory."""
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+    logger.info("GPU memory cache cleared")
+    
+def get_single_gpu_memory(device: torch.device)->str:
+    total_memory = torch.cuda.get_device_properties(device).total_memory
+    reserved_memory = torch.cuda.memory_reserved(device)
+    allocated_memory = torch.cuda.memory_allocated(device)
+    free_memory = total_memory - reserved_memory - allocated_memory
+
+    as_gb = lambda x: round(x / 1024**3, 2)
+
+    return f"Total Memory: {as_gb(total_memory)}GB, Reserved Memory: {as_gb(reserved_memory)}GB, Allocated Memory: {as_gb(allocated_memory)}GB, Free Memory: {as_gb(free_memory)}GB"
+    
+def gpu_mem_info()->str:
+    """Get memory info for all available GPUs."""
+    if not torch.cuda.is_available():
+        return "No GPUs available"
+
+    info = []
+    for i in range(torch.cuda.device_count()):
+        device = torch.device(f"cuda:{i}")
+        mem_info = get_single_gpu_memory(device)
+        info.append(f"GPU {i}: {mem_info}")
+
+    return "\n".join(info)
 
 def set_seed(seed: int):
     """

@@ -299,7 +299,7 @@ def setup_distillation(config: DistillationConfig):
     elif config.teacher_load_in_8bit:
         teacher_kwargs["load_in_8bit"] = True
     else:
-        teacher_kwargs["torch_dtype"] = torch.bfloat16
+        teacher_kwargs["dtype"] = torch.bfloat16
 
     teacher_model = AutoModelForCausalLM.from_pretrained(**teacher_kwargs)
     teacher_model.eval()
@@ -316,14 +316,14 @@ def setup_distillation(config: DistillationConfig):
             compressed_dir=config.student_model_path,
             original_model_name=config.teacher_model,
             device_map="auto",
-            torch_dtype=torch.bfloat16
+            dtype=torch.bfloat16
         )
     else:
         # Fallback to standard loading (for testing or non-compressed models)
         logger.warning("No compression_config.json found, loading as standard model")
         student_model = AutoModelForCausalLM.from_pretrained(
             config.student_model_path,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             trust_remote_code=True
         )
 

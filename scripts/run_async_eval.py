@@ -10,19 +10,24 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import logging
 import sys
+import os
+import torch
 from pathlib import Path
+from dataclasses import dataclass, asdict
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.async_eval import CheckpointEvaluator, EvalConfig, evaluate_baseline
-
+from src.async_eval import Evaluator, EvalConfig
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+VISIBLE = os.environ.get("CUDA_VISIBLE_DEVICES")
+N_GPUS = len(VISIBLE.split(",")) if VISIBLE else torch.cuda.device_count()
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
@@ -35,53 +40,33 @@ def main(cfg: DictConfig):
     """
     logger.info("=" * 80)
     logger.info("MoE Compression - Asynchronous Evaluation")
+    logger.info(f"Detected {N_GPUS} GPUs for evaluation")
     logger.info("=" * 80)
 
     # Print configuration
     logger.info("\nConfiguration:")
     logger.info(OmegaConf.to_yaml(cfg))
 
-    # Optionally evaluate baseline first
-    if cfg.evaluation.evaluate_baseline:
-        logger.info("\n" + "=" * 80)
-        logger.info("Evaluating Baseline Model")
-        logger.info("=" * 80)
-
-        baseline_results = evaluate_baseline(
-            model_name=cfg.model.name,
-            eval_tasks=cfg.evaluation.tasks,
-            output_dir=cfg.output.eval_dir,
-            gpu_ids=cfg.evaluation.async_eval.gpu_ids,
-            batch_size=cfg.evaluation.batch_size,
-            num_fewshot=cfg.evaluation.num_fewshot
-        )
-
-        logger.info(f"\nBaseline results: {baseline_results}")
 
     # Create eval config
     eval_config = EvalConfig(
-        checkpoint_dir=cfg.output.distilled_dir,
-        original_model_name=cfg.model.name,  # Needed for export
+        checkpoint_dir=cfg.output.checkpoints_dir,
+        temp_dir=cfg.output.temp_dir,
+        eval_dir=cfg.output.eval_dir,
         eval_tasks=cfg.evaluation.tasks,
-        gpu_ids=cfg.evaluation.async_eval.gpu_ids,
-        eval_batch_size=cfg.evaluation.batch_size,
+        config_dir=cfg.output.config_dir,
+        batch_size=cfg.evaluation.batch_size,
+        n_gpus=N_GPUS,
+        n_gpus_per_model=cfg.evaluation.async_eval.n_gpus_per_model,
         eval_interval=cfg.evaluation.async_eval.eval_interval,
-        wandb_project=cfg.wandb_project,
-        wandb_run_name=f"{cfg.experiment_name}_eval",
-        num_fewshot=cfg.evaluation.num_fewshot,
-        limit=cfg.evaluation.test_mode.limit if cfg.evaluation.test_mode.enabled else None,
-        use_export=cfg.evaluation.get('use_export', True)  # Export to HF format by default
     )
+        
 
     logger.info("\nEvaluation Configuration:")
-    logger.info(f"  Checkpoint directory: {eval_config.checkpoint_dir}")
-    logger.info(f"  Tasks: {eval_config.eval_tasks}")
-    logger.info(f"  GPUs: {eval_config.gpu_ids}")
-    logger.info(f"  Eval interval: {eval_config.eval_interval}s")
-
+    logger.info(f"  {asdict(eval_config)}")
     # Run async evaluation
     try:
-        evaluator = CheckpointEvaluator(eval_config)
+        evaluator = Evaluator(eval_config)
         evaluator.run()
 
     except KeyboardInterrupt:

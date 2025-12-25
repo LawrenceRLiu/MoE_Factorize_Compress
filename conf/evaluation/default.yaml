@@ -2,34 +2,18 @@
 
 # Tasks to evaluate
 tasks:
-  - wikitext
-  - hellaswag
-  - arc_easy
-  - arc_challenge
-  - winogrande
-  - mmlu
-  - gsm8k
+  wikitext: -1 # perplexity evaluation
+  # mmlu: 5 # five shot evaluation
+  # gsm8k: 8 # eight shot evaluation
+
 
 # Evaluation settings
-batch_size: 8
-num_fewshot: 0  # Zero-shot evaluation
+batch_size: auto  # Let the system decide based on GPU memory
+
 
 # Async evaluation settings
 async_eval:
-  enabled: true
   eval_interval: 60  # Check for new checkpoints every 60 seconds
-  gpu_ids: [6, 7]  # Reserve last 2 GPUs for evaluation
+  n_gpus_per_model: 2  # Number of GPUs to use per model during evaluation
 
-# Export compressed models to HF format before evaluation
-# This materializes the compressed experts so lm_eval can load them
-use_export: true
 
-# Baseline evaluation
-evaluate_baseline: true  # Evaluate original model for comparison
-
-# Quick test mode (for debugging)
-test_mode:
-  enabled: false
-  limit: 100  # Limit to 100 samples per task
-  tasks:
-    - wikitext

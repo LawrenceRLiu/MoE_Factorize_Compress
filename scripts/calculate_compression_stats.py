@@ -14,10 +14,10 @@ from dataclasses import dataclass
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-
-from src.compressed_moe_model import load_compressed_model, CompressedMoEBlock
 from src.utils import human_readable
-
+from src.model_utils import get_model
+from src.compressed_moe import SharedCoreExperts
+from src.shared_core import SharedCoreLayer
 
 @dataclass
 class CompressionStats:
@@ -116,13 +116,14 @@ if __name__ == "__main__":
     logger.info(f"Extracted original model name: {original_model_name}")
     
     # Load compressed model
-    compressed_model = load_compressed_model(
-        compressed_dir=Path(args.compressed_dir) / "checkpoint-0",
-        original_model_name=original_model_name,
-        config_path=config_path,
+    compressed_model, _ = get_model(original_model_name)
+    logger.info(f"Loading compressed model from {Path(args.compressed_dir) / 'checkpoint-0'}...")
+    compressed_model = compressed_model.from_pretrained(
+        Path(args.compressed_dir) / "checkpoint-0",
         device_map="cpu",
-        torch_dtype=torch.float16
+        dtype=torch.float16
     )
+    logger.info("Compressed model loaded.")
     
     
     
@@ -131,7 +132,7 @@ if __name__ == "__main__":
     original_model = AutoModelForCausalLM.from_pretrained(
         original_model_name,
         device_map="cpu",
-        torch_dtype=torch.float16
+        dtype=torch.float16
     )
     
     
@@ -149,6 +150,7 @@ if __name__ == "__main__":
     active_compressed_n_params = -1
 
     num_active_experts = infer_num_active_experts(original_model.config)
+    logger.info(f"Inferred number of active experts during inference: {num_active_experts}") 
     if num_active_experts > 0:
         original_moe_total = 0
         original_moe_active = 0
@@ -169,22 +171,26 @@ if __name__ == "__main__":
         compressed_moe_flops = 0
         compressed_moe_active = 0
         for layer in compressed_model.model.layers:
-            moe_block = None
-            if isinstance(getattr(layer, "mlp", None), CompressedMoEBlock):
-                moe_block = layer.mlp
-            elif isinstance(getattr(layer, "block_sparse_moe", None), CompressedMoEBlock):
-                moe_block = layer.block_sparse_moe
-            if moe_block is not None:
-                for shared_layer in moe_block.shared_core_layers.values():
-                    stats = shared_layer.count_parameters()
-                    active_experts = min(num_active_experts, shared_layer.num_experts)
-                    compressed_moe_total += stats["total_params"]
-                    compressed_moe_active += (
-                        stats["core_params"] + stats["wrapper_params_per_expert"] * active_experts
-                    )
-                    compressed_moe_flops += (
-                        (stats["core_params"] + stats["wrapper_params_per_expert"]) * active_experts
-                    )
+            try: 
+                moe_block = layer.mlp.experts
+            except AttributeError:
+                raise NotImplementedError("Only SharedCoreExperts MoE is supported in this script.")
+
+            for shared_layer in [moe_block.up_shared_core, 
+                                    moe_block.down_shared_core, 
+                                    moe_block.gate_shared_core]:
+                assert isinstance(shared_layer, SharedCoreLayer)
+                
+                stats = shared_layer.count_parameters()
+                # logger.info(f"Shared Layer Stats: {stats}")
+                active_experts = min(num_active_experts, shared_layer.num_experts)
+                compressed_moe_total += stats["total_params"]
+                compressed_moe_active += (
+                    stats["core_params"] + stats["wrapper_params_per_expert"] * active_experts
+                )
+                compressed_moe_flops += (
+                    (stats["core_params"] + stats["wrapper_params_per_expert"]) * active_experts
+                )
 
         original_non_moe = original_n_params - original_moe_total
         compressed_non_moe = compressed_n_params - compressed_moe_total

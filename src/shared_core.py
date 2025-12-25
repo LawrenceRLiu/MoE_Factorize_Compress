@@ -72,31 +72,31 @@ class CompressedExpert(nn.Module):
         rank: Rank for low-rank adapters
     """
 
-    def __init__(self, core: torch.Tensor, d_in: int, d_out: int, rank: int,
+    def __init__(self, d_in: int, d_out: int, rank: int,
                  bias: bool = True):
         super().__init__()
         self.d_in = d_in
         self.d_out = d_out
         self.rank = rank
 
-        # Register core as buffer (shared, not trained per-expert)
-        self.register_buffer('core', core)
 
         # Input and output low-rank wrappers
         self.input_wrapper = LowRankWrapper(d_in, rank, init_zeros=True)
         self.output_wrapper = LowRankWrapper(d_out, rank, init_zeros=True)
-        
+
         if bias:
+            print("using bias in compressed expert")
             self.bias = nn.Parameter(torch.zeros(d_out))
         else:
             self.bias = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, core: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through compressed expert.
 
         Args:
             x: Input tensor of shape [..., d_in]
+            core: Shared core weight matrix of shape [d_out, d_in]
 
         Returns:
             Output tensor of shape [..., d_out]
@@ -105,27 +105,13 @@ class CompressedExpert(nn.Module):
         x = self.input_wrapper(x)
 
         # Apply shared core: C @ x
-        x = x @ self.core.T
+        x = x @ core.T  # [..., d_out]
 
         # Apply output wrapper: (I + U_out @ V_out^T) @ x
         x = self.output_wrapper(x)
         if self.bias is not None:
             x = x + self.bias
         return x
-
-    def reconstruct_weight(self) -> torch.Tensor:
-        """
-        Reconstruct the full weight matrix for analysis or export.
-
-        Returns:
-            W_reconstructed ≈ (I + U_out @ V_out^T) @ C @ (I + U_in @ V_in^T)
-        """
-        # Get wrapper matrices
-        input_mat = self.input_wrapper.as_matrix()  # [d_in, d_in]
-        output_mat = self.output_wrapper.as_matrix()  # [d_out, d_out]
-
-        # Reconstruct: output_mat @ core @ input_mat
-        return output_mat @ self.core @ input_mat
 
 
 class SharedCoreLayer(nn.Module):
@@ -168,8 +154,9 @@ class SharedCoreLayer(nn.Module):
             nn.init.xavier_uniform_(self.core)
 
         # Create compressed experts (they will share the core buffer)
+        # assert not bias, "bias is true"
         self.experts = nn.ModuleList([
-            CompressedExpert(self.core, d_in, d_out, rank, bias=bias)
+            CompressedExpert(d_in, d_out, rank, bias=bias)
             for _ in range(num_experts)
         ])
         self.has_bias = bias
@@ -185,7 +172,7 @@ class SharedCoreLayer(nn.Module):
         Returns:
             Output from the selected expert
         """
-        return self.experts[expert_idx](hidden_states)
+        return self.experts[expert_idx](hidden_states, self.core)
 
     def get_expert(self, idx: int) -> CompressedExpert:
         """Get a specific compressed expert."""

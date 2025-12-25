@@ -22,12 +22,13 @@ from omegaconf import OmegaConf
 import shutil
 
 from .shared_core import initialize_from_experts, SharedCoreLayer
-from .compression_stats import CompressionStats, infer_num_active_experts
-
+from .compressed_moe import SharedCoreExperts
+from .model_utils import get_model
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+PROJECTIONS = ["down_proj", "up_proj", "gate_proj"]
 
 @dataclass
 class CompressionConfig:
@@ -37,19 +38,16 @@ class CompressionConfig:
     num_steps: int = 1000
     lr: float = 1e-3
     output_dir: str = "./models/compressed"
+    temp_dir: str = "./models/temp"
     config_dir: str = "./models/compressed/config"
-    projections: List[str] = None  # e.g., ["gate_proj", "up_proj", "down_proj"]
-
-    def __post_init__(self):
-        if self.projections is None:
-            self.projections = ["gate_proj", "up_proj", "down_proj"]
+    
+    
 
 
 
 def extract_all_expert_weights(
     model_name: str,
-    projections: List[str],
-    output_dir: str,
+    temp_dir: str,
     device: str = "cuda:0"
 ):
     """
@@ -60,7 +58,6 @@ def extract_all_expert_weights(
 
     Args:
         model_name: HuggingFace model identifier
-        projections: List of projection names to extract
         output_dir: Directory to save extracted weights
         device: Device to load model on
     """
@@ -78,7 +75,7 @@ def extract_all_expert_weights(
     num_layers = len(model.model.layers)
     logger.info(f"Extracting weights from {num_layers} layers")
 
-    extraction_dir = Path(output_dir) / "extracted_weights"
+    extraction_dir = Path(temp_dir) / "extracted_weights"
     extraction_dir.mkdir(parents=True, exist_ok=True)
 
     # Extract weights for each layer and projection
@@ -94,7 +91,7 @@ def extract_all_expert_weights(
         else:
             raise AttributeError(f"Could not locate experts in layer {layer_idx}")
 
-        for projection in projections:
+        for projection in PROJECTIONS:
             # precalculate the save path:
             save_path = extraction_dir / f"layer_{layer_idx}_{projection}.pt"
             if save_path.exists():
@@ -182,64 +179,54 @@ def compression_worker(
                 layer_idx, projection = task
 
                 logger.info(f"[Worker {worker_id} | GPU {gpu_id}] Processing layer {layer_idx}, {projection}")
-
-                # Load pre-extracted weights from disk
-                weight_path = Path(extraction_dir) / f"layer_{layer_idx}_{projection}.pt"
-                if not weight_path.exists():
-                    raise FileNotFoundError(f"Extracted weights not found: {weight_path}")
-
-                weight_data = torch.load(weight_path, map_location="cpu")
-                expert_weights = weight_data["expert_weights"]
-                expert_biases = weight_data.get("expert_biases", None) #shape of (num_experts, d_out) if present
-                # Run zero-shot initialization
-                core, wrappers = initialize_from_experts(
-                    expert_weights=expert_weights,
-                    rank=config.rank,
-                    num_steps=config.num_steps,
-                    lr=config.lr,
-                    device=device,
-                    logger=logger,
-                    layer_name=f"Layer {layer_idx} {projection}"
-                )
-
-                # Package results
-                result = {
-                    "layer_idx": layer_idx,
-                    "projection": projection,
-                    "core": core.cpu(),
-                    "wrappers": [
-                        {
-                            "U_in": U_in.cpu(),
-                            "V_in": V_in.cpu(),
-                            "U_out": U_out.cpu(),
-                            "V_out": V_out.cpu()
-                        }
-                        for U_in, V_in, U_out, V_out in wrappers
-                    ],
-                    "metadata": {
-                        "num_experts": weight_data["num_experts"],
-                        "d_in": weight_data["d_in"],
-                        "d_out": weight_data["d_out"],
-                        "rank": config.rank
-                    }
-                }
-                
-                #add the biases if available
-                if expert_biases is not None:
-                    result["biases"] = [b.cpu() for b in expert_biases]
-
                 # Save result
-                output_dir = Path(config.output_dir) / f"layer_{layer_idx}"
+                output_dir = Path(config.temp_dir) / f"layer_{layer_idx}"
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 output_path = output_dir / f"{projection}.pt"
-                torch.save(result, output_path)
+                if not output_path.exists():
+                    # Load pre-extracted weights from disk
+                    weight_path = Path(extraction_dir) / f"layer_{layer_idx}_{projection}.pt"
+                    if not weight_path.exists():
+                        raise FileNotFoundError(f"Extracted weights not found: {weight_path}")
 
-                # Save metadata as JSON
-                metadata_path = output_dir / f"{projection}_metadata.json"
-                with open(metadata_path, 'w') as f:
-                    json.dump(result["metadata"], f, indent=2)
+                    weight_data = torch.load(weight_path, map_location="cpu")
+                    expert_weights = weight_data["expert_weights"]
+                    expert_biases = weight_data.get("expert_biases", None) #shape of (num_experts, d_out) if present
+                    # Run zero-shot initialization
+                    core, wrappers = initialize_from_experts(
+                        expert_weights=expert_weights,
+                        rank=config.rank,
+                        num_steps=config.num_steps,
+                        lr=config.lr,
+                        device=device,
+                        logger=logger,
+                        layer_name=f"Layer {layer_idx} {projection}"
+                    )
+                    
+                    #initalize the layer
+                    layer = SharedCoreLayer(
+                        num_experts=weight_data["num_experts"],
+                        d_in=weight_data["d_in"],
+                        d_out=weight_data["d_out"],
+                        rank=config.rank,
+                        bias=(expert_biases is not None)
+                    ).to(device)
+                    #set the weights
+                    layer.core.data = core.to(device)
+                    for i, (U_in, V_in, U_out, V_out) in enumerate(wrappers):
+                        layer.experts[i].input_wrapper.U.data = U_in.to(device)
+                        layer.experts[i].input_wrapper.V.data = V_in.to(device)
+                        layer.experts[i].output_wrapper.U.data = U_out.to(device)
+                        layer.experts[i].output_wrapper.V.data = V_out.to(device)
+                        if expert_biases is not None:
+                            layer.experts[i].bias.data = expert_biases[i].to(device)
+                    
 
+                    torch.save(layer.state_dict(), output_path)
+                    logger.info(f"[Worker {worker_id} | GPU {gpu_id}] Saved compressed weights to {output_path}")
+                else:
+                    logger.info(f"[Worker {worker_id} | GPU {gpu_id}] Skipping layer {layer_idx}, {projection}, already exists at {output_path}")
                 # Put result in queue
                 result_queue.put({
                     "status": "success",
@@ -323,15 +310,15 @@ def parallel_compression(
         num_layers = model_config.num_hidden_layers
         logger.info(f"Model has {num_layers} layers")
 
-    # Infer number of active experts for statistics
-    num_active_experts = infer_num_active_experts(model_config)
-    logger.info(f"Model uses {num_active_experts} active experts per token")
 
     # Create output directory
     #add a `checkpoint-0` suffix to indicate zero-shot init
     config.output_dir = os.path.join(config.output_dir, "checkpoint-0")
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    temp_dir = Path(config.temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
     # Save compression config
     config_path = Path(config.config_dir) / "compression_config.yaml"
@@ -348,8 +335,7 @@ def parallel_compression(
         logger.info("="*60)
         extraction_dir = extract_all_expert_weights(
             model_name=model_name,
-            projections=config.projections,
-            output_dir=str(output_dir),
+            temp_dir=str(temp_dir),
             device=f"cuda:{gpu_ids[0]}"  # Use first GPU for extraction
         )
     else:
@@ -365,7 +351,7 @@ def parallel_compression(
     # Create work items: (layer_idx, projection)
     work_items = []
     for layer_idx in range(num_layers):
-        for projection in config.projections:
+        for projection in PROJECTIONS:
             work_items.append((layer_idx, projection))
 
     total_tasks = len(work_items)
@@ -466,10 +452,57 @@ def parallel_compression(
     logger.info(f"Results saved to: {output_dir}")
     logger.info("="*60)
     
-    #clear the extraction directory
-    if extraction_dir.exists():
-        shutil.rmtree(extraction_dir)
-        logger.info(f"Cleaned up extraction directory: {extraction_dir}")
+    logger.info("Converting compressed weights to final format...")
+    # At this point, all compressed weights are saved in temp_dir
+    
+    #currently this will only work for Qwen-3 MoE models, will need to generalize later
+    model_fn,model_config = get_model(model_name)
+    
+    #set the config by adding the compression config
+    model_config.compression_config = asdict(config)
+    model = model_fn(model_config).to('cpu')
+    
+    for layer_idx in range(num_layers):
+        logger.info(f"Integrating compressed weights for layer {layer_idx}...")
+        temp_path = Path(config.temp_dir) / f"layer_{layer_idx}"
+        if not temp_path.exists():
+            logger.error(f"Compressed weights not found for layer {layer_idx}, {projection} at {temp_path}")
+            continue
+
+        #set the weights in the model
+        layer = model.model.layers[layer_idx]
+        if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'experts'):
+            experts:SharedCoreExperts = layer.mlp.experts
+        elif hasattr(layer, 'block_sparse_moe') and hasattr(layer.block_sparse_moe, 'experts'):
+            experts:SharedCoreExperts = layer.block_sparse_moe.experts
+        else:
+            raise AttributeError(f"Could not locate experts in layer {layer_idx}")
+        
+        for projection in PROJECTIONS:
+            logger.info(f"  Loading projection {projection}...")
+            temp_path_proj = temp_path / f"{projection}.pt"
+            assert temp_path_proj.exists(), f"Compressed weights not found for layer {layer_idx}, {projection} at {temp_path_proj}"
+            state_dict = torch.load(temp_path_proj, map_location="cpu",)
+            for key in state_dict.keys():
+                state_dict[key] = state_dict[key].to('cpu').to(torch.float16)
+                
+            if projection == "down_proj":
+                experts.down_shared_core.load_state_dict(state_dict, strict = False)
+            elif projection == "up_proj":
+                experts.up_shared_core.load_state_dict(state_dict, strict = False)
+            elif projection == "gate_proj":
+                experts.gate_shared_core.load_state_dict(state_dict, strict = False)
+    
+    #save the final model
+    model.save_pretrained(output_dir)
+    logger.info(f"Final compressed model saved to {output_dir}")
+    
+    
+        
+    #clear the temp directory
+    if Path(config.temp_dir).exists():
+        shutil.rmtree(config.temp_dir)
+        logger.info(f"Cleaned up temporary directory: {config.temp_dir}")
 
     # Return summary
     return {

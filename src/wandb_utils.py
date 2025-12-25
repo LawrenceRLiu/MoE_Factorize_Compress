@@ -13,5 +13,3 @@ class WandBConfig:
     
     def to_dict(self) -> dict:
         return asdict(self)
-    
-def initialize_wandb(config: WandBConfig):

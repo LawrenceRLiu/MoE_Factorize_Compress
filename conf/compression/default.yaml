@@ -8,12 +8,6 @@ rank: 64  # Adjust based on desired compression ratio
 num_steps: 1000  # Optimization steps for reconstruction
 lr: 1e-3  # Learning rate for Adam optimizer
 
-# Which projections to compress
-projections:
-  - gate_proj
-  - up_proj
-  - down_proj
-
 # Parallelization settings
 num_layers: null  # Will be inferred from model config
 parallel_mode: true  # Use parallel GPU compression

@@ -11,6 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 import logging
 import sys
 from pathlib import Path
+from dataclasses import dataclass, asdict
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -49,16 +50,11 @@ def main(cfg: DictConfig):
         lr=cfg.compression.lr,
         output_dir=cfg.output.checkpoints_dir,
         config_dir=cfg.output.config_dir,
-        projections=cfg.compression.projections,
+        temp_dir=cfg.output.temp_dir,
     )
 
     logger.info("\nCompression Configuration:")
-    logger.info(f"  Model: {compression_config.model_name}")
-    logger.info(f"  Rank: {compression_config.rank}")
-    logger.info(f"  Optimization steps: {compression_config.num_steps}")
-    logger.info(f"  Learning rate: {compression_config.lr}")
-    logger.info(f"  Projections: {compression_config.projections}")
-    logger.info(f"  Output directory: {compression_config.output_dir}")
+    logger.info(f"  {asdict(compression_config)}")
 
     # GPU configuration
     gpu_ids = cfg.gpu_ids

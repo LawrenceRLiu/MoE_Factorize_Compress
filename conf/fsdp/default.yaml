@@ -1,0 +1,86 @@
+# Fully Sharded Data Parallel (FSDP) Configuration
+# For distributed training across multiple GPUs/nodes
+
+# Enable FSDP
+enabled: false  # Set to true to enable FSDP
+
+# FSDP configuration
+fsdp_config:
+  # Sharding strategy
+  # Options: "FULL_SHARD", "SHARD_GRAD_OP", "NO_SHARD", "HYBRID_SHARD"
+  # FULL_SHARD: Shard model parameters, gradients, and optimizer states (most memory efficient)
+  # SHARD_GRAD_OP: Shard gradients and optimizer states only
+  # NO_SHARD: No sharding (equivalent to DDP)
+  # HYBRID_SHARD: Shard within node, replicate across nodes
+  sharding_strategy: "FULL_SHARD"
+
+  # Offload parameters to CPU
+  # Reduces GPU memory at cost of slower training
+  offload_params: false
+
+  # Offload gradients to CPU
+  offload_gradients: false
+
+  # Auto wrap policy - automatically wrap layers
+  # Options: "transformer_based", "size_based", "no_wrap"
+  auto_wrap_policy: "transformer_based"
+
+  # Minimum number of parameters for a layer to be wrapped (if using size_based)
+  min_num_params: 1e8  # 100M parameters
+
+  # Backward prefetch
+  # Prefetch next layer's parameters during backward pass
+  backward_prefetch: "BACKWARD_PRE"  # or "BACKWARD_POST" or null
+
+  # Forward prefetch
+  forward_prefetch: false
+
+  # State dict type for checkpointing
+  # Options: "FULL_STATE_DICT", "LOCAL_STATE_DICT", "SHARDED_STATE_DICT"
+  state_dict_type: "FULL_STATE_DICT"
+
+  # Mixed precision configuration
+  mixed_precision:
+    param_dtype: "bf16"  # Parameter dtype: "fp32", "fp16", "bf16"
+    reduce_dtype: "fp32"  # Gradient reduction dtype
+    buffer_dtype: "fp32"  # Buffer dtype
+
+# DeepSpeed configuration (alternative to FSDP)
+deepspeed:
+  enabled: false  # Set to true to use DeepSpeed instead of FSDP
+  config_file: null  # Path to DeepSpeed config JSON file
+  # If config_file is null, will use settings below
+  zero_optimization:
+    stage: 2  # ZeRO stage: 0, 1, 2, or 3
+    offload_optimizer:
+      device: "cpu"  # or "nvme"
+      pin_memory: true
+    offload_param:
+      device: "cpu"
+      pin_memory: true
+  fp16:
+    enabled: false
+  bf16:
+    enabled: true
+  gradient_accumulation_steps: 8
+  gradient_clipping: 1.0
+
+# Distributed training settings
+distributed:
+  # Number of nodes
+  num_nodes: 1
+
+  # Number of GPUs per node
+  num_gpus_per_node: 8
+
+  # Master address for multi-node training
+  master_addr: "localhost"
+
+  # Master port
+  master_port: 29500
+
+  # Backend: "nccl" for GPU, "gloo" for CPU
+  backend: "nccl"
+
+  # Timeout (in seconds)
+  timeout: 1800  # 30 minutes

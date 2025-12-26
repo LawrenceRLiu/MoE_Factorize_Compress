@@ -1,23 +1,35 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
-Main script for knowledge distillation of compressed MoE models.
+Run knowledge distillation training for compressed MoE models.
+
+This script uses Hydra for configuration management, ensuring consistency
+with other scripts in the pipeline.
 
 Usage:
-    python scripts/run_distillation.py [--config-name CONFIG]
+    python scripts/run_distillation.py
+
+Configuration is loaded from conf/config.yaml and conf/distillation/default.yaml
 """
 
-import hydra
-from omegaconf import DictConfig, OmegaConf
-import logging
 import sys
+import logging
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
-from src.distillation import run_distillation, DistillationConfig
+import torch
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
+from src.distillation_utils import (
+    setup_distillation_pipeline,
+    run_distillation_training
+)
+from src.utils import set_seed, log_gpu_memory
 
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -26,66 +38,96 @@ logger = logging.getLogger(__name__)
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
-def main(cfg: DictConfig):
+def main(config: DictConfig):
     """
-    Main function for knowledge distillation.
+    Main distillation training function.
 
     Args:
-        cfg: Hydra configuration
+        config: Hydra configuration
     """
-    logger.info("=" * 80)
-    logger.info("MoE Compression - Knowledge Distillation")
-    logger.info("=" * 80)
+    logger.info("="*80)
+    logger.info("Knowledge Distillation Training")
+    logger.info("="*80)
 
     # Print configuration
     logger.info("\nConfiguration:")
-    logger.info(OmegaConf.to_yaml(cfg))
+    logger.info(OmegaConf.to_yaml(config))
 
-    # Create distillation config
-    distillation_config = DistillationConfig(
-        teacher_model=cfg.model.name,
-        student_model_path=cfg.output.compressed_dir,
-        output_dir=cfg.output.distilled_dir,
-        dataset_name=cfg.distillation.dataset.name,
-        dataset_split=cfg.distillation.dataset.split,
-        max_length=cfg.distillation.dataset.max_length,
-        temperature=cfg.distillation.temperature,
-        alpha=cfg.distillation.alpha,
-        teacher_load_in_8bit=cfg.distillation.teacher.load_in_8bit,
-        teacher_load_in_4bit=cfg.distillation.teacher.load_in_4bit,
-        per_device_train_batch_size=cfg.distillation.training.per_device_train_batch_size,
-        gradient_accumulation_steps=cfg.distillation.training.gradient_accumulation_steps,
-        learning_rate=cfg.distillation.training.learning_rate,
-        num_train_epochs=cfg.distillation.training.num_train_epochs,
-        max_steps=cfg.distillation.training.max_steps,
-        warmup_steps=cfg.distillation.training.warmup_steps,
-        logging_steps=cfg.distillation.logging.logging_steps,
-        save_steps=cfg.distillation.logging.save_steps,
-        eval_steps=cfg.distillation.logging.eval_steps,
-        bf16=cfg.distillation.training.bf16,
-        wandb_project=cfg.wandb_project,
-        wandb_run_name=f"{cfg.experiment_name}_distillation"
+    # Log GPU information
+    logger.info("\nGPU Information:")
+    log_gpu_memory()
+
+    # Set random seed
+    set_seed(config.seed)
+    logger.info(f"\nRandom seed set to: {config.seed}")
+
+    # Setup distillation pipeline
+    logger.info("\n" + "="*80)
+    logger.info("Setting up distillation pipeline...")
+    logger.info("="*80 + "\n")
+
+    # Resolve model paths
+    teacher_path = config.distillation.teacher.model_path
+    if teacher_path is None:
+        teacher_path = config.model.name
+        logger.info(f"Using model.name as teacher: {teacher_path}")
+
+    student_path = config.distillation.student.model_path
+    if student_path is None:
+        # Default to checkpoint-0 from zero-shot initialization
+        student_path = str(Path(config.output.checkpoints_dir) / "checkpoint-0")
+        logger.info(f"Using checkpoint-0 as student: {student_path}")
+
+    # Check if student model exists
+    if not Path(student_path).exists():
+        logger.error(f"Student model not found at: {student_path}")
+        logger.error("Please run compression/zero-shot initialization first!")
+        raise FileNotFoundError(f"Student model not found: {student_path}")
+
+    # Setup pipeline
+    student_model, train_dataset, eval_dataset, tokenizer = setup_distillation_pipeline(
+        config=config.distillation,
+        teacher_model_path=teacher_path,
+        student_model_path=student_path,
+        force_regenerate_logits=False  # Set to True to regenerate cached logits
     )
 
-    logger.info("\nDistillation Configuration:")
-    logger.info(f"  Teacher: {distillation_config.teacher_model}")
-    logger.info(f"  Student: {distillation_config.student_model_path}")
-    logger.info(f"  Dataset: {distillation_config.dataset_name}")
-    logger.info(f"  Temperature: {distillation_config.temperature}")
-    logger.info(f"  Alpha: {distillation_config.alpha}")
-    logger.info(f"  Output: {distillation_config.output_dir}")
+    logger.info("\n" + "="*80)
+    logger.info("Pipeline setup complete!")
+    logger.info(f"Training dataset size: {len(train_dataset)}")
+    if eval_dataset:
+        logger.info(f"Evaluation dataset size: {len(eval_dataset)}")
+    logger.info("="*80)
 
-    # Run distillation
-    try:
-        run_distillation(distillation_config)
+    # Run distillation training
+    logger.info("\n" + "="*80)
+    logger.info("Starting distillation training...")
+    logger.info("="*80 + "\n")
 
-        logger.info("\n" + "=" * 80)
-        logger.info("Distillation completed successfully!")
-        logger.info("=" * 80)
+    trainer = run_distillation_training(
+        config=config.distillation,
+        student_model=student_model,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        tokenizer=tokenizer
+    )
 
-    except Exception as e:
-        logger.error(f"Distillation failed: {e}", exc_info=True)
-        raise
+    # Save final model
+    final_output_dir = Path(config.distillation.training.output_dir) / "final"
+    logger.info(f"\nSaving final model to {final_output_dir}")
+    trainer.save_model(str(final_output_dir))
+
+    # Save tokenizer
+    tokenizer.save_pretrained(str(final_output_dir))
+    logger.info(f"Tokenizer saved to {final_output_dir}")
+
+    logger.info("\n" + "="*80)
+    logger.info("Distillation training complete!")
+    logger.info("="*80 + "\n")
+
+    # Final GPU memory info
+    logger.info("Final GPU memory state:")
+    log_gpu_memory()
 
 
 if __name__ == "__main__":

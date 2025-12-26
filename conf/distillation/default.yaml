@@ -1,47 +1,149 @@
 # Knowledge Distillation Configuration
 
-# Dataset configuration
-dataset:
-  name: "HuggingFaceFW/fineweb-edu"
-  split: "train"
-  streaming: true
-  max_length: 2048
-
 # Teacher model configuration
 teacher:
-  # Teacher is the original uncompressed model
-  load_in_8bit: false  # Quantize teacher to save VRAM
-  load_in_4bit: false  # Use 4-bit if even more VRAM saving needed
+  model_path: null  # Path to teacher model (original MoE), if null uses model.name from main config
+  use_cached_logits: true  # Whether to use pre-cached teacher logits
+  cache_dir: "${output.temp_dir}/teacher_logits"  # Directory for cached teacher logits
 
-# Distillation hyperparameters
-temperature: 2.0  # Softmax temperature for distillation
-alpha: 0.5  # Weight for KL loss (1-alpha for CE loss)
+  # Teacher logit generation settings (used by generate_teacher_logits.py)
+  generation:
+    top_k: 64  # Number of top logits to cache (memory efficiency)
+    batch_size: 4  # Batch size for teacher inference
+    device: "cuda"  # Device to run teacher on (for single GPU)
+    force_regenerate: false  # Whether to regenerate if cache exists
+
+    # Multi-GPU parallel generation (experimental)
+    num_workers: 1  # Number of parallel GPU workers (1 = single GPU)
+    devices: null  # Explicit device list ["cuda:0", "cuda:1", ...] or null for auto-detection
+    worker_id: 0  # For manual multi-worker runs (advanced usage)
+    total_workers: 1  # Total number of workers (advanced usage)
+
+# Student model configuration
+student:
+  model_path: null  # Path to student model checkpoint (compressed MoE), if null uses checkpoint-0
+
+# Loss function configuration
+loss:
+  alpha: 0.5  # Weight for distillation loss (1-alpha for CE loss)
+  temperature: 2.0  # Temperature for KL divergence
+  kl_reduction: "batchmean"  # Reduction method for KL loss: 'batchmean', 'sum', 'mean'
 
 # Training configuration
 training:
-  per_device_train_batch_size: 1
-  gradient_accumulation_steps: 8  # Effective batch size = 8
-  learning_rate: 2e-5
-  num_train_epochs: 1
-  max_steps: -1  # Train for full epoch
+  output_dir: "${output.checkpoints_dir}"
+  num_train_epochs: 3
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  learning_rate: 5e-5
   warmup_steps: 100
-  weight_decay: 0.01
-
-  # Optimization
-  optim: "adamw_torch"
-  lr_scheduler_type: "cosine"
-  gradient_checkpointing: true
-
-  # Mixed precision
-  bf16: true
-  fp16: false
-
-# Logging and checkpointing
-logging:
   logging_steps: 10
   save_steps: 500
-  eval_steps: 500
   save_total_limit: 3
+  fp16: false
+  bf16: true
+  dataloader_num_workers: 4
+  remove_unused_columns: false
 
-# Evaluation during training
-eval_during_training: false  # Use async eval instead
+  # Optimizer configuration
+  optim: "adamw_torch"
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  max_grad_norm: 1.0
+
+  # Learning rate scheduler
+  lr_scheduler_type: "cosine"
+
+  # FSDP (Fully Sharded Data Parallel) for distributed training
+  # Uncomment and configure for multi-GPU training
+  # fsdp: "full_shard"  # Options: "full_shard", "shard_grad_op", "hybrid_shard", "no_shard"
+  # fsdp_config:
+  #   fsdp_transformer_layer_cls_to_wrap: ["Qwen3MoeDecoderLayer"]  # Adjust for your model
+  #   fsdp_backward_prefetch: "backward_pre"
+  #   fsdp_forward_prefetch: false
+  #   fsdp_auto_wrap_policy: "TRANSFORMER_BASED_WRAP"
+  #   fsdp_state_dict_type: "FULL_STATE_DICT"
+  #   fsdp_offload_params: false
+  #   fsdp_sync_module_states: true
+
+  # Gradient checkpointing (saves memory)
+  # gradient_checkpointing: true
+
+# Parameter-specific learning rates (regex-based)
+# If lr is 0.0, those parameters are frozen
+# These are multiplicative factors applied to the base learning_rate
+
+# Default learning rate multiplier for parameters that don't match any pattern
+# Set to 0.0 to freeze all non-matching parameters by default
+# Set to 1.0 to train all non-matching parameters at full LR (default)
+default_lr_multiplier: 1.0
+
+parameter_lr_multipliers:
+  - pattern: ".*shared_core.*"  # SharedCore layers (compressed MoE)
+    lr_multiplier: 1.0
+  - pattern: ".*experts.*input_wrapper.*"  # Input wrappers
+    lr_multiplier: 1.0
+  - pattern: ".*experts.*output_wrapper.*"  # Output wrappers
+    lr_multiplier: 1.0
+  - pattern: ".*lm_head.*"  # Language model head
+    lr_multiplier: 0.1
+  - pattern: ".*embed_tokens.*"  # Embeddings
+    lr_multiplier: 0.1
+  - pattern: ".*norm.*"  # Layer norms
+    lr_multiplier: 0.5
+  - pattern: ".*gate.*"  # Router gates (not gate_proj)
+    lr_multiplier: 0.5
+  # Default: any parameter not matching above patterns uses lr_multiplier=1.0
+
+# Dataset configuration
+dataset:
+  name: fineweb  # HuggingFace dataset name (e.g., "wikitext", "c4")
+  config_name: sample-10BT  # Dataset config (e.g., "wikitext-2-raw-v1")
+  split: "train"  # Dataset split to use
+  streaming: false  # Whether to use streaming dataset
+  max_samples: null  # Maximum number of samples to use (null = all for non-streaming)
+                    # REQUIRED for streaming datasets! Must specify a limit to avoid
+                    # processing billions of samples (e.g., FineWeb has 13T tokens)
+                    # Recommended: 100k-10M for streaming datasets
+  text_column: "text"  # Column name containing text
+
+  # Tokenization
+  max_length: 2048  # Maximum sequence length
+
+  # Streaming dataset settings (for large pretraining datasets like FineWeb, SlimPajama)
+  streaming_buffer_size: 10000  # Number of samples to buffer when streaming
+  streaming_chunk_size: 1000  # Process and cache in chunks of N samples
+  num_proc: 4  # Number of processes for tokenization (non-streaming only)
+
+# Evaluation configuration
+evaluation:
+  eval_steps: 500  # Evaluate every N steps
+  per_device_eval_batch_size: 2
+  eval_dataset:
+    name: null
+    config_name: null
+    split: "validation"
+    max_samples: 1000
+
+# Multi-stage training configuration
+# Allows for training with different frozen parameters at different stages
+# Example: Stage 1 - only train compressed experts, Stage 2 - train everything
+stages:
+  enabled: false  # Set to true to enable multi-stage training
+  configs:
+    - stage_name: "stage1_experts_only"
+      num_epochs: 2
+      parameter_lr_multipliers:
+        - pattern: ".*shared_core.*"
+          lr_multiplier: 1.0
+        - pattern: ".*experts.*"
+          lr_multiplier: 1.0
+        - pattern: ".*"  # Everything else frozen
+          lr_multiplier: 0.0
+
+    - stage_name: "stage2_full_model"
+      num_epochs: 1
+      parameter_lr_multipliers:
+        - pattern: ".*"
+          lr_multiplier: 1.0

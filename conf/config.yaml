@@ -3,6 +3,8 @@ defaults:
   - compression: default
   - distillation: default
   - evaluation: default
+  - teacher_logits: default
+  - fsdp: default
   - _self_
 
 # Experiment tracking

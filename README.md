@@ -19,28 +19,38 @@ Where:
 - $U_e^{in}, V_e^{in}$: Input low-rank adapter (rank $r \ll d_{in}$)
 - $U_e^{out}, V_e^{out}$: Output low-rank adapter (rank $r \ll d_{out}$)
 
+### Methodology
+1. **Zero-Shot Initialization**: Parallelized reconstruction of expert weights using Adam to minimize L2 norm between the original and approximated weights.
+2. **Knowledge Distillation**: Fine-tuning the compressed model using teacher-student training with blended loss (CE + KL divergence) to recover performance. See [DISTILLATION.md](docs/DISTILLATION.md) for details.
+3. **Asynchronous Evaluation**: Dedicated GPUs evaluate checkpoints during distillation to monitor performance without interrupting training.
+
 ## Project Structure
 
 ```
 MoE_Compress/
 ├── src/                          # Source code
-│   ├── shared_core.py           # Core compression module
+│   ├── models/                   # Modified HuggingFace model implementations
+│   ├── shared_core.py           # Shared core + low-rank wrapper implementation
+│   ├── compressed_moe.py        # Compressed MoE module
 │   ├── zero_shot_init.py        # Zero-shot initialization
-│   ├── distillation.py          # Knowledge distillation
-│   ├── async_eval.py            # Asynchronous evaluation
-│   └── utils.py                 # Utility functions
-├── scripts/                      # Executable scripts
-│   ├── run_compression.py       # Run zero-shot compression
-│   ├── run_distillation.py      # Run knowledge distillation
-│   └── run_async_eval.py        # Run async evaluation
-├── conf/                         # Hydra configuration files
-│   ├── config.yaml              # Main config
-│   ├── compression/             # Compression configs
-│   ├── distillation/            # Distillation configs
-│   └── evaluation/              # Evaluation configs
-└── models/                       # Model artifacts (created during runtime)
+│   ├── distillation_trainer.py # Knowledge distillation trainer
+│   ├── teacher_logits.py        # Teacher logits caching
+│   └── distillation_utils.py   # Distillation utilities
+├── conf/                        # Hydra configuration files
+│   ├── config.yaml             # Main configuration
+│   ├── compression/            # Compression configs
+│   ├── distillation/           # Distillation configs
+│   └── evaluation/             # Evaluation configs
+├── scripts/                     # Executable scripts
+│   ├── run_compression.py      # Run compression pipeline
+│   ├── generate_teacher_logits.py  # Generate cached teacher logits
+│   └── run_async_eval.py       # Asynchronous evaluation
+├── examples/                    # Example usage scripts
+│   └── distillation_example.py # Complete distillation pipeline
+├── docs/                        # Documentation
+│   └── DISTILLATION.md         # Detailed distillation guide
+└── models/                      # Model checkpoints and outputs
 ```
-
 ## Installation
 
 The project uses a conda environment named `MoE_Compress` with the following packages:
@@ -52,135 +62,91 @@ The project uses a conda environment named `MoE_Compress` with the following pac
 - datasets
 - hydra-core
 - wandb
+#TODO: provide environment.yml
 
-Additional required packages:
-```bash
-conda activate MoE_Compress
-pip install bitsandbytes  # For quantization
-pip install sentencepiece  # For tokenization
-```
 
-## Usage
+## Quick Start
 
-### Phase 1: Zero-Shot Initialization
-
-Compress the model using parallel zero-shot reconstruction:
-
+### 1. Compression
+Compress a MoE model using zero-shot initialization:
 ```bash
 python scripts/run_compression.py
 ```
 
-This will:
-1. Load the original MoE model (Qwen-3-30B-A3B)
-2. For each layer and projection (gate_proj, up_proj, down_proj):
-   - Initialize core as mean of expert weights
-   - Initialize low-rank wrappers
-   - Optimize to minimize reconstruction error
-3. Save compressed weights to `models/compressed/`
-
-**Configuration**: Edit `conf/compression/qwen_3_30b.yaml` to adjust:
-- `rank`: Low-rank dimension (lower = more compression)
-- `num_steps`: Optimization steps
-- `lr`: Learning rate
-
-### Phase 2: Knowledge Distillation
-
-Recover performance using knowledge distillation:
+### 2. Knowledge Distillation
+Train the compressed model with knowledge distillation:
 
 ```bash
-# Start distillation (on training GPUs)
+# Option A: Generate teacher logits first (recommended for large datasets)
+python scripts/generate_teacher_logits.py
+
+# For large pretraining datasets (FineWeb, SlimPajama), use streaming:
+python scripts/generate_teacher_logits.py \
+    distillation.dataset.name=HuggingFaceFW/fineweb \
+    distillation.dataset.streaming=true
+
+# For multi-GPU acceleration (4 GPUs):
+./scripts/generate_teacher_logits_parallel.sh 4
+
+# Then run distillation
 python scripts/run_distillation.py
 
-# Start async evaluation (on evaluation GPUs)
+# Option B: All-in-one (for smaller datasets)
+python scripts/run_distillation.py
+```
+
+For distributed training with FSDP (multiple GPUs):
+```bash
+# Single node, 8 GPUs
+torchrun --nproc_per_node=8 scripts/run_distillation.py
+```
+
+**New Features:**
+- **Streaming Dataset Support**: Process datasets larger than memory (FineWeb, SlimPajama, etc.)
+- **Multi-GPU Teacher Logit Generation**: Parallelize across multiple GPUs for faster generation
+- **Unified Configuration**: All teacher logit settings now in `conf/distillation/default.yaml`
+
+See [docs/DISTILLATION.md](docs/DISTILLATION.md) for detailed distillation documentation.
+See [docs/TEACHER_LOGITS_ADVANCED.md](docs/TEACHER_LOGITS_ADVANCED.md) for streaming and multi-GPU guides.
+
+### 3. Evaluation
+Asynchronously evaluate checkpoints during training:
+```bash
 python scripts/run_async_eval.py
 ```
 
-The distillation script will:
-1. Load teacher (original) and student (compressed) models
-2. Train student to match teacher's output distribution
-3. Save checkpoints periodically
+## Key Features
 
-The async evaluation script will:
-1. Monitor checkpoint directory
-2. Evaluate new checkpoints on benchmarks
-3. Log results to WandB
+### Knowledge Distillation
+- **Offline Teacher Logits**: Cache teacher predictions to reduce GPU memory by ~50%
+- **Blended Loss**: Combines cross-entropy and KL divergence with configurable weights
+- **Parameter-Specific Learning Rates**: Fine-grained control via regex pattern matching
+- **Multi-Stage Training**: Support for freezing/unfreezing different parameter groups
+- **Memory Efficient**: Uses top-k logits storage with HDF5 compression
 
-**Configuration**: Edit `conf/distillation/default.yaml` and `conf/evaluation/default.yaml`
+See [docs/DISTILLATION.md](docs/DISTILLATION.md) for comprehensive documentation.
 
-## GPU Configuration
+## Configuration
 
-The default setup assumes:
-- **8 GPUs total**: 2× A100 (80GB) + 6× A6000 (48GB)
-- **Phase 1**: All 8 GPUs used in parallel for compression
-- **Phase 2**:
-  - GPUs 0-5: Distillation training
-  - GPUs 6-7: Async evaluation
+All experiments are configured via Hydra in `conf/`:
+- `config.yaml`: Main configuration
+- `compression/default.yaml`: Compression settings (rank, optimization steps)
+- `distillation/default.yaml`: Distillation settings (alpha, temperature, learning rates)
+- `evaluation/default.yaml`: Evaluation settings
 
-Modify `gpu_ids` in `conf/config.yaml` to match your setup.
+Example distillation config:
+```yaml
+loss:
+  alpha: 0.5              # Weight for distillation loss
+  temperature: 2.0        # Temperature for KL divergence
 
-## Expected Results
-
-For Qwen-3-30B-A3B with typical MoE structure:
-- **Target compression**: 20-30% of original parameters
-- **Active parameters**: May slightly increase during inference
-- **Performance**: Recovered through knowledge distillation
-
-Example with rank=64, 8 experts, d_model=4096, d_ffn=14336:
-- Original: ~470M params per layer
-- Compressed: ~73M params per layer
-- **Compression ratio**: 0.155 (84.5% reduction)
-
-## Monitoring
-
-Results are logged to WandB project `moe-compression`. View:
-- Compression statistics
-- Distillation loss curves
-- Evaluation metrics over time
-
-## Advanced Usage
-
-### Custom Model
-
-To compress a different MoE model:
-
-1. Create new config: `conf/compression/my_model.yaml`
-2. Update `model.name` in `conf/config.yaml`
-3. Adjust layer structure extraction in `src/zero_shot_init.py` if needed
-
-### Adjusting Compression Ratio
-
-- **Higher compression**: Decrease `rank` (e.g., rank=32)
-- **Better quality**: Increase `rank` (e.g., rank=128)
-- **More optimization**: Increase `num_steps`
-
-### Test Mode
-
-For quick testing with limited data:
-
-```bash
-# Edit conf/evaluation/default.yaml
-test_mode:
-  enabled: true
-  limit: 100  # Only 100 samples per task
+parameter_lr_multipliers:
+  - pattern: ".*shared_core.*"
+    lr_multiplier: 1.0    # Train compressed experts
+  - pattern: ".*embed_tokens.*"
+    lr_multiplier: 0.1    # Conservative on embeddings
 ```
 
-## Citation
+## Known Issues/Future Work
+- Currently there is a bug where each script in `./scripts` independently uses hydra to access the config. Thus the config could be modified between each script is run and cause unexpected behavior. Ideally, we should create a single script which access and saves the config into a file which each script can then read from to ensure consistency.
 
-If you use this code, please cite:
-
-```bibtex
-@article{moe_compression_2025,
-  title={Shared-Core Compression for Mixture of Experts Language Models},
-  author={Your Name},
-  year={2025}
-}
-```
-
-## License
-
-[Specify your license]
-
-## Acknowledgments
-
-- Builds on Transformers, DeepSpeed, and lm-evaluation-harness
-- Inspired by LoRA and other parameter-efficient techniques

@@ -1,0 +1,78 @@
+# Recovery Training Configuration
+# Phase 2: Pretrain the compressed model to recover performance
+
+# Dataset configuration
+dataset:
+  name: "HuggingFaceFW/fineweb-edu"  # High-quality pretraining dataset
+  split: "train"
+  streaming: true  # Stream dataset to handle large datasets
+  text_column: "text"  # Column containing text data
+  max_length: 2048  # Maximum sequence length
+  num_samples: null  # null for full dataset, set to a number for testing
+
+# Training hyperparameters
+training:
+  # Batch size and accumulation
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+
+  # Learning rate and schedule
+  learning_rate: 2e-5
+  lr_scheduler_type: "cosine"
+  warmup_steps: 500
+
+  # Training duration
+  num_train_epochs: 1
+  max_steps: -1  # -1 means use num_train_epochs
+
+  # Optimization
+  optim: "adamw_torch"
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # Precision
+  bf16: true
+  fp16: false
+
+  # Checkpointing
+  save_steps: 500
+  save_total_limit: 5  # Keep only the last 5 checkpoints to save space
+
+  # Logging
+  logging_steps: 10
+  logging_first_step: true
+
+  # Evaluation (optional during recovery)
+  evaluation_strategy: "no"  # "steps" if you want periodic eval
+  eval_steps: 1000
+
+  # Other settings
+  gradient_checkpointing: true  # Save memory
+  dataloader_num_workers: 4
+  remove_unused_columns: false
+
+# FSDP Configuration
+fsdp:
+  enabled: true
+  # FSDP sharding strategy: "full_shard" (zero3), "shard_grad_op" (zero2), "no_shard" (zero0)
+  fsdp_sharding_strategy: "full_shard"  # Full ZeRO-3 style sharding
+  fsdp_offload_params: false  # Set to true if you need to offload to CPU
+  fsdp_state_dict_type: "full_state_dict"  # How to save checkpoints
+  fsdp_transformer_layer_cls_to_wrap: null  # Will be auto-detected
+  fsdp_backward_prefetch: "backward_pre"
+  fsdp_forward_prefetch: false
+  fsdp_use_orig_params: true  # Required for gradient checkpointing compatibility
+
+# Model loading
+model:
+  compressed_checkpoint: null  # Path to compressed model from Phase 1 (checkpoint-0)
+  dtype: "bfloat16"
+  device_map: null  # Use null for FSDP, will be handled by FSDP
+  trust_remote_code: true
+
+# WandB logging
+wandb:
+  enabled: true
+  run_name: null  # Will be auto-generated if null
+  tags: ["recovery", "pretraining"]
+  notes: "Recovery pretraining on compressed MoE model"

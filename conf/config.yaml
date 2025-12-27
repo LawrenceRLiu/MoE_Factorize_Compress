@@ -1,8 +1,8 @@
 # Main configuration file for MoE Compression
 defaults:
   - compression: default
-  - distillation: default
   - evaluation: default
+  - recovery: default
   - _self_
 
 # Experiment tracking

@@ -1,0 +1,80 @@
+# Recovery Training Configuration for 2x A100 GPUs
+# Optimized for fitting Qwen-3-30B-A3B on 2x 80GB A100s (cuda:0, cuda:1)
+
+# @package _global_
+
+# Dataset configuration
+dataset:
+  name: "HuggingFaceFW/fineweb-edu"
+  split: "train"
+  streaming: true
+  text_column: "text"
+  max_length: 2048
+  num_samples: null  # Full dataset
+
+# Training hyperparameters
+training:
+  # Batch size and accumulation
+  per_device_train_batch_size: 1  # Start with 1, can increase to 2 if memory allows
+  gradient_accumulation_steps: 16  # Effective batch size = 1 * 2 * 16 = 32
+
+  # Learning rate and schedule
+  learning_rate: 2e-5
+  lr_scheduler_type: "cosine"
+  warmup_steps: 500
+
+  # Training duration
+  num_train_epochs: 1
+  max_steps: -1
+
+  # Optimization
+  optim: "adamw_torch"
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # Precision - use bf16 for A100s
+  bf16: true
+  fp16: false
+
+  # Checkpointing
+  save_steps: 500
+  save_total_limit: 5
+
+  # Logging
+  logging_steps: 10
+  logging_first_step: true
+
+  # Evaluation
+  evaluation_strategy: "no"
+  eval_steps: 1000
+
+  # Memory optimization
+  gradient_checkpointing: true  # IMPORTANT: Enable to save memory
+  dataloader_num_workers: 4
+  remove_unused_columns: false
+
+# FSDP Configuration for 2 GPUs
+fsdp:
+  enabled: true
+  # Full sharding across 2 GPUs - most memory efficient
+  fsdp_sharding_strategy: "full_shard"  # ZeRO-3: shard params, gradients, optimizer states
+  fsdp_offload_params: false  # No CPU offload needed for 2x80GB A100s
+  fsdp_state_dict_type: "full_state_dict"
+  fsdp_transformer_layer_cls_to_wrap: null  # Auto-detect
+  fsdp_backward_prefetch: "backward_pre"
+  fsdp_forward_prefetch: false
+  fsdp_use_orig_params: true  # Required for gradient checkpointing
+
+# Model loading
+model:
+  compressed_checkpoint: null  # Will default to checkpoint-0
+  dtype: "bfloat16"
+  device_map: null  # IMPORTANT: null for FSDP (FSDP handles device placement)
+  trust_remote_code: true
+
+# WandB logging
+wandb:
+  enabled: true
+  run_name: null
+  tags: ["recovery", "pretraining", "2-gpu"]
+  notes: "Recovery training on 2x A100 GPUs with FSDP"

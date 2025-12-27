@@ -1,7 +1,9 @@
-from transformers import AutoModelForCausalLM, AutoConfig
-import torch 
+from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
+import torch
 import re
 from typing import Union, Dict, Optional
+from pathlib import Path
+import json
 
 from src.compressed_moe import SharedCoreExperts, SharedCoreLayer
 from src.utils import clean
@@ -108,5 +110,69 @@ def get_hf_equivalent_model(
     clean()
     
     return hf_model
-        
-    
+
+
+def load_compressed_model(
+    compressed_dir: str,
+    original_model_name: str,
+    device_map: Union[str, Dict] = "auto",
+    dtype: Optional[torch.dtype] = None,
+    trust_remote_code: bool = True
+):
+    """
+    Load a compressed MoE model from a checkpoint directory.
+
+    Args:
+        compressed_dir: Path to the compressed model checkpoint directory
+        original_model_name: Name of the original HuggingFace model
+        device_map: Device map for loading the model (use None for FSDP)
+        dtype: Torch data type for the model
+        trust_remote_code: Whether to trust remote code
+
+    Returns:
+        Loaded compressed model
+    """
+    compressed_path = Path(compressed_dir)
+
+    # Verify the checkpoint exists
+    if not compressed_path.exists():
+        raise ValueError(f"Compressed model directory not found: {compressed_dir}")
+
+    # Load the compressed model using the appropriate model class
+    compressed_model_class, _ = get_model(original_model_name)
+
+    # Load the model
+    model = compressed_model_class.from_pretrained(
+        str(compressed_path),
+        device_map=device_map,
+        torch_dtype=dtype,
+        trust_remote_code=trust_remote_code
+    )
+
+    return model
+
+
+def save_compressed_model(
+    model,
+    output_dir: str,
+    tokenizer: Optional[AutoTokenizer] = None
+):
+    """
+    Save a compressed MoE model to a directory.
+
+    Args:
+        model: The compressed model to save
+        output_dir: Directory to save the model
+        tokenizer: Optional tokenizer to save alongside the model
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Save the model using HuggingFace's save_pretrained
+    model.save_pretrained(str(output_path))
+
+    # Save tokenizer if provided
+    if tokenizer is not None:
+        tokenizer.save_pretrained(str(output_path))
+
+    print(f"Compressed model saved to: {output_path}")

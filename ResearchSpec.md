@@ -33,7 +33,7 @@ Our algorithms will work in two phases:
 
 **Phase 1:  Zero-Shot Init,** All 8 GPUs will independently (parallel layer/projection wise) work to compress the model based on the algorithm detailed in 4.1. 
 
-**Phase 2\. Recovery Distillation with Async Evaluatio**n. To recover performance, we will conduct knowledge distillation between the original and compressed model. To evaluate the checkpoints, we will save some of the GPUs to asynchronously evaluate the checkpoints.
+**Phase 2\. Recovery Training with Async Evaluation**. To recover performance, we will conduct recovery pretraining on the compressed model. To evaluate the checkpoints, we will save some of the GPUs to asynchronously evaluate the checkpoints.
 
 ## **4\. Implementation Specification**
 

@@ -304,8 +304,11 @@ class DistillationTrainer(Trainer):
         # Extract teacher logits if present
         teacher_logits_values = inputs.pop("teacher_logits_values", None)
         teacher_logits_indices = inputs.pop("teacher_logits_indices", None)
-        seq_length = inputs.pop("seq_length", None)
+        seq_length = inputs.pop("seq_length", None)  # Actual content length (for reference)
         vocab_size = inputs.pop("vocab_size", None)
+
+        # Get attention mask before forward pass (we'll need it for masking losses)
+        attention_mask = inputs.get("attention_mask", None)
 
         # Forward pass through student model
         outputs = model(**inputs)
@@ -356,14 +359,50 @@ class DistillationTrainer(Trainer):
                 dim=-1
             )
 
-            # Compute KL divergence
-            # KL(teacher || student) = sum(teacher * log(teacher/student))
-            kl_loss = F.kl_div(
-                student_log_probs.view(-1, student_log_probs.size(-1)),
-                teacher_probs.view(-1, teacher_probs.size(-1)),
-                reduction=self.kl_reduction,
-                log_target=False
-            )
+            # Compute KL divergence with attention mask
+            if attention_mask is not None:
+                # Shift attention mask to match shifted logits (for next-token prediction)
+                # Original: [batch, seq_len], Shifted: [batch, seq_len-1]
+                shift_mask = attention_mask[..., :-1].contiguous()
+
+                # Compute KL divergence per position (no reduction yet)
+                # Shape: [batch, seq_len-1, vocab_size]
+                kl_div_per_position = F.kl_div(
+                    student_log_probs,
+                    teacher_probs,
+                    reduction='none',
+                    log_target=False
+                )
+
+                # Sum over vocabulary dimension to get KL per position
+                # Shape: [batch, seq_len-1]
+                kl_div_per_token = kl_div_per_position.sum(dim=-1)
+
+                # Apply mask: only compute loss on non-padding positions
+                # Shape: [batch, seq_len-1]
+                masked_kl_div = kl_div_per_token * shift_mask
+
+                # Compute final loss based on reduction method
+                if self.kl_reduction == 'batchmean':
+                    # Average over all non-padding tokens
+                    num_valid_tokens = shift_mask.sum()
+                    kl_loss = masked_kl_div.sum() / num_valid_tokens if num_valid_tokens > 0 else masked_kl_div.sum()
+                elif self.kl_reduction == 'mean':
+                    # Average over all positions (including padding)
+                    kl_loss = masked_kl_div.mean()
+                elif self.kl_reduction == 'sum':
+                    # Sum over all non-padding positions
+                    kl_loss = masked_kl_div.sum()
+                else:
+                    raise ValueError(f"Unknown kl_reduction: {self.kl_reduction}")
+            else:
+                # No attention mask - use original behavior
+                kl_loss = F.kl_div(
+                    student_log_probs.view(-1, student_log_probs.size(-1)),
+                    teacher_probs.view(-1, teacher_probs.size(-1)),
+                    reduction=self.kl_reduction,
+                    log_target=False
+                )
 
             # Scale by temperature^2 (as per distillation literature)
             kl_loss = kl_loss * (self.temperature ** 2)

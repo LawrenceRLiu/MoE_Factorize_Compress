@@ -4,20 +4,29 @@
 teacher:
   model_path: null  # Path to teacher model (original MoE), if null uses model.name from main config
   use_cached_logits: true  # Whether to use pre-cached teacher logits
-  cache_dir: "${output.temp_dir}/teacher_logits"  # Directory for cached teacher logits
+  cache_dir: "${output.cache_dir}/teacher_logits/${distillation.dataset.name}_${distillation.dataset.config_name}/"  # Directory for cached teacher logits
 
   # Teacher logit generation settings (used by generate_teacher_logits.py)
   generation:
     top_k: 64  # Number of top logits to cache (memory efficiency)
-    batch_size: 4  # Batch size for teacher inference
-    device: "cuda"  # Device to run teacher on (for single GPU)
-    force_regenerate: false  # Whether to regenerate if cache exists
+    batch_size: 32  # Batch size for teacher inference
+    force_regenerate: true  # Whether to regenerate if cache exists
 
-    # Multi-GPU parallel generation (experimental)
-    num_workers: 1  # Number of parallel GPU workers (1 = single GPU)
-    devices: null  # Explicit device list ["cuda:0", "cuda:1", ...] or null for auto-detection
-    worker_id: 0  # For manual multi-worker runs (advanced usage)
-    total_workers: 1  # Total number of workers (advanced usage)
+    # GPU assignment is handled by CUDA_VISIBLE_DEVICES
+    # Model loading always uses device_map="auto" for maximum flexibility
+    # HuggingFace automatically:
+    #   - Single GPU in CUDA_VISIBLE_DEVICES -> entire model on that GPU
+    #   - Multiple GPUs in CUDA_VISIBLE_DEVICES -> model sharded across them
+
+    # Multi-GPU Parallelization (use generate_teacher_logits_parallel.sh):
+    # - Syntax: ./generate_teacher_logits_parallel.sh [gpus_per_model] [gpu_list]
+    # - Examples:
+    #   ./generate_teacher_logits_parallel.sh 1 "0,1,2,3,4,5,6,7"  # 8 workers, 1 GPU each
+    #   ./generate_teacher_logits_parallel.sh 2 "0,1,2,3,4,5,6,7"  # 4 workers, 2 GPUs each
+    #   ./generate_teacher_logits_parallel.sh 4 "0,1,2,3,4,5,6,7"  # 2 workers, 4 GPUs each
+
+    worker_id: 0  # For multi-worker runs (set by parallel script)
+    total_workers: 1  # Total number of workers (set by parallel script)
 
 # Student model configuration
 student:
@@ -98,8 +107,8 @@ parameter_lr_multipliers:
 
 # Dataset configuration
 dataset:
-  name: fineweb  # HuggingFace dataset name (e.g., "wikitext", "c4")
-  config_name: sample-10BT  # Dataset config (e.g., "wikitext-2-raw-v1")
+  name: "HuggingFaceFW/fineweb"  # HuggingFace dataset name (e.g., "wikitext", "c4")
+  config_name: "sample-10BT"  # Dataset config (e.g., "wikitext-2-raw-v1")
   split: "train"  # Dataset split to use
   streaming: false  # Whether to use streaming dataset
   max_samples: null  # Maximum number of samples to use (null = all for non-streaming)

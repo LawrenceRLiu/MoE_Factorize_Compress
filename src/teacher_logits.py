@@ -53,7 +53,6 @@ class TeacherLogitsGenerator:
         teacher_model: PreTrainedModel,
         cache_dir: str,
         top_k: int = 64,
-        device: str = "cuda"
     ):
         """
         Initialize teacher logits generator.
@@ -69,21 +68,16 @@ class TeacherLogitsGenerator:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.top_k = top_k
-        self.device = device
-
-        # Move teacher to device
-        if hasattr(teacher_model, 'device'):
-            logger.info(f"Teacher model already on device: {teacher_model.device}")
-        else:
-            self.teacher_model = self.teacher_model.to(device)
-
+        
+        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
     @torch.no_grad()
     def generate_and_cache_logits(
         self,
         dataset: Union[Dataset, IterableDataset],
         batch_size: int = 4,
         max_length: int = 2048,
-        num_workers: int = 4,
         force_regenerate: bool = False,
         streaming: bool = False,
         streaming_chunk_size: int = 1000,
@@ -211,6 +205,7 @@ class TeacherLogitsGenerator:
             )
 
             sample_idx = 0
+            logger.info(f"logit indices ds shape: {logits_indices_ds.shape}")
 
             # Process in batches
             for i in tqdm(range(0, num_samples, batch_size), desc="Generating teacher logits"):
@@ -220,7 +215,7 @@ class TeacherLogitsGenerator:
                 # Move batch to device
                 input_ids = batch["input_ids"].to(self.device)
                 attention_mask = batch["attention_mask"].to(self.device)
-
+                logger.info(f"Processing batch {i} to {batch_end}, input_ids shape: {input_ids.shape}")
                 # Get teacher logits
                 outputs = self.teacher_model(
                     input_ids=input_ids,
@@ -229,13 +224,15 @@ class TeacherLogitsGenerator:
                 )
 
                 logits = outputs.logits  # (batch_size, seq_len, vocab_size)
+                logging.info(f"Logits shape: {logits.shape}")
 
                 # Process each sample in the batch
                 for j in range(logits.size(0)):
-                    sample_logits = logits[j]  # (seq_len, vocab_size)
+                    sample_logits = logits[j]  # (max_length, vocab_size) - already padded
                     seq_len = attention_mask[j].sum().item()
 
-                    # Get top-k values and indices
+                    # Get top-k values and indices for all positions (including padded)
+                    # The logits are already at max_length due to input padding
                     topk_values, topk_indices = torch.topk(
                         sample_logits,
                         k=self.top_k,
@@ -246,23 +243,13 @@ class TeacherLogitsGenerator:
                     topk_values_cpu = topk_values.cpu().numpy().astype(np.float16)
                     topk_indices_cpu = topk_indices.cpu().numpy().astype(np.int32)
 
-                    # Pad to max_length if necessary
-                    if seq_len < max_length:
-                        pad_len = max_length - seq_len
-                        topk_values_cpu = np.pad(
-                            topk_values_cpu,
-                            ((0, pad_len), (0, 0)),
-                            mode='constant',
-                            constant_values=0
-                        )
-                        topk_indices_cpu = np.pad(
-                            topk_indices_cpu,
-                            ((0, pad_len), (0, 0)),
-                            mode='constant',
-                            constant_values=0
-                        )
+                    # Verify shape matches expected dimensions
+                    assert topk_values_cpu.shape == (max_length, self.top_k), \
+                        f"Shape mismatch: expected ({max_length}, {self.top_k}), got {topk_values_cpu.shape}"
 
                     # Store in HDF5
+                    # Note: We store logits for all positions including padding
+                    # The seq_length field indicates actual content length
                     logits_values_ds[sample_idx] = topk_values_cpu
                     logits_indices_ds[sample_idx] = topk_indices_cpu
                     seq_lengths_ds[sample_idx] = seq_len
@@ -439,10 +426,11 @@ class TeacherLogitsGenerator:
 
         # Process each sample in the batch
         for j in range(batch_size):
-            sample_logits = logits[j]  # (seq_len, vocab_size)
+            sample_logits = logits[j]  # (max_length, vocab_size) - already padded
             seq_len = attention_mask[j].sum().item()
 
-            # Get top-k values and indices
+            # Get top-k values and indices for all positions (including padded)
+            # The logits are already at max_length due to input padding
             topk_values, topk_indices = torch.topk(
                 sample_logits,
                 k=self.top_k,
@@ -453,23 +441,13 @@ class TeacherLogitsGenerator:
             topk_values_cpu = topk_values.cpu().numpy().astype(np.float16)
             topk_indices_cpu = topk_indices.cpu().numpy().astype(np.int32)
 
-            # Pad to max_length if necessary
-            if seq_len < max_length:
-                pad_len = max_length - seq_len
-                topk_values_cpu = np.pad(
-                    topk_values_cpu,
-                    ((0, pad_len), (0, 0)),
-                    mode='constant',
-                    constant_values=0
-                )
-                topk_indices_cpu = np.pad(
-                    topk_indices_cpu,
-                    ((0, pad_len), (0, 0)),
-                    mode='constant',
-                    constant_values=0
-                )
+            # Verify shape matches expected dimensions
+            assert topk_values_cpu.shape == (max_length, self.top_k), \
+                f"Shape mismatch: expected ({max_length}, {self.top_k}), got {topk_values_cpu.shape}"
 
             # Store in HDF5
+            # Note: We store logits for all positions including padding
+            # The seq_length field indicates actual content length
             sample_idx = start_idx + j
             logits_values_ds[sample_idx] = topk_values_cpu
             logits_indices_ds[sample_idx] = topk_indices_cpu
@@ -556,9 +534,14 @@ class CachedLogitsDataset(torch.utils.data.Dataset):
         input_ids = sample["input_ids"]
         labels = input_ids.clone()
 
+        # Mask padding positions in labels with -100 so they're ignored in loss computation
+        # This ensures CE loss only computes on actual tokens, not padding
+        attention_mask = sample["attention_mask"]
+        labels[attention_mask == 0] = -100
+
         return {
             "input_ids": input_ids,
-            "attention_mask": sample["attention_mask"],
+            "attention_mask": attention_mask,
             "labels": labels,
             "teacher_logits_values": logits_values,
             "teacher_logits_indices": logits_indices,

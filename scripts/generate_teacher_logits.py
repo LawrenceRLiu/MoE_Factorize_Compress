@@ -22,6 +22,7 @@ You can override settings via command line:
 import sys
 import logging
 from pathlib import Path
+import os
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -35,11 +36,55 @@ from transformers import AutoTokenizer
 from src.distillation_utils import prepare_dataset, generate_teacher_logits
 from src.utils import set_seed, log_gpu_memory
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+
+def setup_logging(worker_id: int = 0, log_dir: Path = None):
+    """
+    Setup logging configuration that works well with tqdm and multi-worker scenarios.
+
+    Args:
+        worker_id: Worker ID for multi-worker runs (0 = main worker)
+        log_dir: Directory for log files (None = use default)
+    """
+    # For multi-worker: use separate log files to avoid conflicts
+    # For single worker: log to console
+    if worker_id > 0:
+        # Worker processes: log to files only
+        log_dir = log_dir or (project_root / "logs")
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / f"teacher_logits_worker_{worker_id}.log"
+
+        logging.basicConfig(
+            level=logging.INFO,
+            format=f'%(asctime)s - Worker {worker_id} - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+            ],
+            force=True  # Override any existing config
+        )
+
+        # Also reduce transformers/datasets logging verbosity
+        logging.getLogger("transformers").setLevel(logging.WARNING)
+        logging.getLogger("datasets").setLevel(logging.WARNING)
+    else:
+        # Main worker (worker 0): log to console
+        # Use tqdm-compatible logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[logging.StreamHandler(sys.stdout)],
+            force=True
+        )
+
+        # For tqdm compatibility: ensure tqdm writes to stderr are visible
+        # This prevents tqdm progress bars from conflicting with logging
+        logging.getLogger("transformers").setLevel(logging.WARNING)
+        logging.getLogger("datasets").setLevel(logging.WARNING)
+
+    return logging.getLogger(__name__)
+
+
+# Will be configured in main() based on worker_id
+logger = None
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
@@ -50,12 +95,18 @@ def main(config: DictConfig):
     Args:
         config: Hydra configuration
     """
-    logger.info("="*80)
-    logger.info("Teacher Logits Generation")
-    logger.info("="*80)
+    global logger
 
     # Use distillation config (unified config approach)
     dist_cfg = config.distillation
+
+    # Setup logging based on worker_id
+    worker_id = dist_cfg.teacher.generation.get('worker_id', 0)
+    logger = setup_logging(worker_id=worker_id)
+
+    logger.info("="*80)
+    logger.info("Teacher Logits Generation")
+    logger.info("="*80)
 
     # Print configuration
     logger.info("\nConfiguration:")
@@ -121,11 +172,8 @@ def main(config: DictConfig):
         cache_dir=dist_cfg.teacher.cache_dir,
         top_k=gen_cfg.top_k,
         batch_size=gen_cfg.batch_size,
-        device=gen_cfg.device,
         force_regenerate=gen_cfg.force_regenerate,
         # New parameters
-        num_workers=gen_cfg.get('num_workers', 1),
-        devices=gen_cfg.get('devices', None),
         worker_id=gen_cfg.get('worker_id', 0),
         total_workers=gen_cfg.get('total_workers', 1),
         streaming=dist_cfg.dataset.streaming,

@@ -3,7 +3,6 @@ defaults:
   - compression: default
   - distillation: default
   - evaluation: default
-  - teacher_logits: default
   - fsdp: default
   - _self_
 
@@ -26,5 +25,6 @@ output:
   checkpoints_dir: "${output.base_dir}/checkpoints" #we expect the checkpoints here to be of the form 'checkpoint-<step>' with the zero-shot init being saved as 'checkpoint-0'
   eval_dir: "${output.base_dir}/evals" # Evaluation results, we expect the evals of each checkpoint to be saved here
   temp_dir: "${output.base_dir}/tmp" #to store temp files
+  cache_dir: "cache/${model.name}" #to store cached files like teacher logits, to be deleted at the end 
 # Random seed for reproducibility
 seed: 42

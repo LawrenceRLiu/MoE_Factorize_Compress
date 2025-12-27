@@ -19,15 +19,25 @@ python scripts/generate_teacher_logits.py \
 
 **Why?** FineWeb has 15T tokens. Without max_samples, it would run for months!
 
-### Multi-GPU Parallel (4 GPUs)
+### Multi-GPU Parallel
+
+**Syntax**: `./scripts/generate_teacher_logits_parallel.sh [gpus_per_model] [gpu_list]`
+
 ```bash
-./scripts/generate_teacher_logits_parallel.sh 4
+# 8 GPUs, 1 GPU per model -> 8 workers (small model, max parallelism)
+./scripts/generate_teacher_logits_parallel.sh 1 "0,1,2,3,4,5,6,7"
+
+# 8 GPUs, 2 GPUs per model -> 4 workers (medium model ~34B)
+./scripts/generate_teacher_logits_parallel.sh 2 "0,1,2,3,4,5,6,7"
+
+# 8 GPUs, 4 GPUs per model -> 2 workers (large model ~70B)
+./scripts/generate_teacher_logits_parallel.sh 4 "0,1,2,3,4,5,6,7"
+
+# Auto-detect all GPUs, 1 per model
+./scripts/generate_teacher_logits_parallel.sh 1
 ```
 
-### Multi-GPU Parallel (8 GPUs)
-```bash
-./scripts/generate_teacher_logits_parallel.sh 8
-```
+See [docs/PARALLEL_GPU_EXAMPLES.md](docs/PARALLEL_GPU_EXAMPLES.md) for more examples.
 
 ## Configuration Quick Reference
 

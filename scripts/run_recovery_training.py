@@ -5,9 +5,28 @@ Main script for Phase 2: Recovery pretraining on compressed models.
 Uses Hydra for configuration management and FSDP for distributed training.
 
 Usage:
+    # Single GPU
     python scripts/run_recovery_training.py \
-        model.compressed_checkpoint=/path/to/checkpoint-0 \
         experiment_name=my_experiment
+
+    # Multi-GPU (RECOMMENDED: use Accelerate)
+    accelerate launch --config_file accelerate_config_2xa100.yaml \
+        scripts/run_recovery_training.py \
+        --config-name config \
+        recovery=two_gpu \
+        experiment_name=my_experiment
+
+    # Multi-GPU (Alternative: use torchrun)
+    torchrun --nproc_per_node=2 scripts/run_recovery_training.py \
+        experiment_name=my_experiment
+
+    # Custom checkpoint
+    accelerate launch --config_file accelerate_config_2xa100.yaml \
+        scripts/run_recovery_training.py \
+        recovery.model.compressed_checkpoint=/path/to/checkpoint-0 \
+        experiment_name=my_experiment
+
+For 2x 80GB A100s, see accelerate_config_2xa100.yaml and conf/recovery/two_gpu.yaml
 """
 
 import os
@@ -46,6 +65,10 @@ def setup_fsdp_args(cfg: DictConfig, training_args_dict: dict) -> dict:
     """
     Configure FSDP settings for TrainingArguments.
 
+    IMPORTANT: When using Accelerate with FSDP, FSDP should be configured in
+    the Accelerate config file, NOT in TrainingArguments. This function checks
+    for Accelerate and skips TrainingArguments FSDP config if Accelerate is detected.
+
     Args:
         cfg: Hydra configuration
         training_args_dict: Dictionary of training arguments
@@ -53,11 +76,24 @@ def setup_fsdp_args(cfg: DictConfig, training_args_dict: dict) -> dict:
     Returns:
         Updated training arguments dictionary
     """
+    # Check if we're using Accelerate (it sets this env var)
+    import os
+    using_accelerate = os.environ.get("ACCELERATE_CONFIG_FILE") is not None or \
+                      os.environ.get("ACCELERATE_USE_FSDP") is not None
+
+    if using_accelerate:
+        logger.info("=" * 80)
+        logger.info("ACCELERATE DETECTED:")
+        logger.info("  FSDP will be configured by Accelerate, not TrainingArguments")
+        logger.info("  Skipping TrainingArguments FSDP configuration to avoid conflicts")
+        logger.info("=" * 80)
+        return training_args_dict
+
     if not cfg.recovery.fsdp.enabled:
         logger.info("FSDP is disabled")
         return training_args_dict
 
-    logger.info("Configuring FSDP for distributed training")
+    logger.info("Configuring FSDP via TrainingArguments (NOT using Accelerate)")
 
     # Basic FSDP configuration
     fsdp_config = cfg.recovery.fsdp
@@ -235,6 +271,37 @@ def main(cfg: DictConfig):
 
     training_config = cfg.recovery.training
 
+    # Calculate max_steps from max_tokens if needed
+    max_steps = training_config.max_steps
+    if max_steps is None or max_steps <= 0:
+        # Calculate from max_tokens
+        max_tokens = training_config.max_tokens
+        max_length = cfg.recovery.dataset.max_length
+        per_device_batch_size = training_config.per_device_train_batch_size
+        gradient_accumulation_steps = training_config.gradient_accumulation_steps
+
+        # Get number of GPUs from environment or config
+        import torch.distributed as dist
+        if dist.is_initialized():
+            world_size = dist.get_world_size()
+        else:
+            world_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
+
+        # Calculate effective batch size in tokens
+        tokens_per_batch = max_length * per_device_batch_size * gradient_accumulation_steps * world_size
+        max_steps = int(max_tokens / tokens_per_batch)
+
+        logger.info("="*80)
+        logger.info("Calculated max_steps from max_tokens:")
+        logger.info(f"  max_tokens: {max_tokens:,}")
+        logger.info(f"  max_length (tokens/sequence): {max_length}")
+        logger.info(f"  per_device_batch_size: {per_device_batch_size}")
+        logger.info(f"  gradient_accumulation_steps: {gradient_accumulation_steps}")
+        logger.info(f"  world_size (num GPUs): {world_size}")
+        logger.info(f"  tokens_per_batch: {tokens_per_batch:,}")
+        logger.info(f"  => max_steps: {max_steps:,}")
+        logger.info("="*80)
+
     training_args_dict = {
         # Output
         "output_dir": str(checkpoints_dir / "trainer_state"),
@@ -251,7 +318,7 @@ def main(cfg: DictConfig):
 
         # Training duration
         "num_train_epochs": training_config.num_train_epochs,
-        "max_steps": training_config.max_steps,
+        "max_steps": max_steps,
 
         # Optimization
         "optim": training_config.optim,
@@ -273,7 +340,7 @@ def main(cfg: DictConfig):
         "report_to": "wandb" if cfg.recovery.wandb.enabled else "none",
 
         # Evaluation
-        "evaluation_strategy": training_config.evaluation_strategy,
+        "eval_strategy": training_config.evaluation_strategy,  # Note: renamed from evaluation_strategy in transformers
         "eval_steps": training_config.eval_steps if training_config.evaluation_strategy == "steps" else None,
 
         # Other

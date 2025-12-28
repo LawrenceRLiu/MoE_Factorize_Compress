@@ -163,7 +163,7 @@ class RecoveryTrainer(Trainer):
         logger.info("RecoveryTrainer initialized")
         logger.info(f"Checkpoints will be saved to: {checkpoints_dir}")
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
         Compute standard language modeling loss.
 
@@ -174,6 +174,7 @@ class RecoveryTrainer(Trainer):
             model: The model
             inputs: Batch inputs
             return_outputs: Whether to return model outputs
+            num_items_in_batch: Number of items in batch (for newer transformers versions)
 
         Returns:
             Loss tensor (and optionally outputs)

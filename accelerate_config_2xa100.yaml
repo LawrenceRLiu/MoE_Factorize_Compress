@@ -1,0 +1,74 @@
+# Accelerate Configuration for 2x 80GB A100 GPUs
+# Optimized for recovery training of compressed MoE models
+#
+# To use this config:
+#   CUDA_VISIBLE_DEVICES=0,1 accelerate launch --config_file accelerate_config_2xa100.yaml \
+#       scripts/run_recovery_training.py --config-name config recovery=two_gpu experiment_name=my_experiment
+#
+# Or set as default:
+#   export ACCELERATE_CONFIG_FILE=accelerate_config_2xa100.yaml
+#   export CUDA_VISIBLE_DEVICES=0,1
+#   accelerate launch scripts/run_recovery_training.py --config-name config recovery=two_gpu experiment_name=my_experiment
+#
+# IMPORTANT: Use CUDA_VISIBLE_DEVICES=0,1 to restrict to only the 2x A100 GPUs (cuda:0, cuda:1)
+
+compute_environment: LOCAL_MACHINE
+
+# Distributed training settings
+distributed_type: FSDP
+num_processes: 2  # 2x A100 GPUs
+
+# Machine configuration
+machine_rank: 0
+main_process_ip: null
+main_process_port: null
+main_training_function: main
+num_machines: 1
+rdzv_backend: static
+
+# GPU configuration
+gpu_ids: "0,1"  # cuda:0 and cuda:1
+use_cpu: false
+
+# Mixed precision training
+mixed_precision: bf16  # Use bfloat16 for A100s (better than fp16)
+
+# FSDP Configuration
+fsdp_config:
+  # Sharding strategy: FULL_SHARD = ZeRO-3 (most memory efficient)
+  # Other options: SHARD_GRAD_OP (ZeRO-2), NO_SHARD (DDP)
+  fsdp_sharding_strategy: FULL_SHARD
+
+  # No CPU offload needed for 2x 80GB A100s
+  fsdp_offload_params: false
+
+  # Checkpoint saving strategy
+  fsdp_state_dict_type: FULL_STATE_DICT
+
+  # Auto-wrap policy: wrap each transformer layer
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_transformer_layer_cls_to_wrap: null  # Auto-detect from model
+
+  # Prefetching for better performance
+  fsdp_backward_prefetch: BACKWARD_PRE
+  fsdp_forward_prefetch: false
+
+  # Use original parameters (required for gradient checkpointing)
+  fsdp_use_orig_params: true
+
+  # CPU RAM efficient loading
+  fsdp_cpu_ram_efficient_loading: true
+
+  # Activation checkpointing (gradient checkpointing)
+  # Note: This is controlled by the training script's gradient_checkpointing setting
+  fsdp_activation_checkpointing: false
+
+  # Sync module states at startup
+  fsdp_sync_module_states: true
+
+# Dynamo settings (optional - for torch.compile optimization)
+dynamo_config:
+  dynamo_backend: "no"  # Set to "inductor" to enable torch.compile
+
+# Logging
+debug: false

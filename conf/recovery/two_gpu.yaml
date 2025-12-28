@@ -1,5 +1,18 @@
 # Recovery Training Configuration for 2x A100 GPUs
 # Optimized for fitting Qwen-3-30B-A3B on 2x 80GB A100s (cuda:0, cuda:1)
+#
+# RECOMMENDED USAGE with Accelerate:
+#   accelerate launch --config_file accelerate_config_2xa100.yaml \
+#       scripts/run_recovery_training.py \
+#       --config-name config \
+#       recovery=two_gpu \
+#       experiment_name=my_experiment
+#
+# Alternative with torchrun:
+#   torchrun --nproc_per_node=2 scripts/run_recovery_training.py \
+#       --config-name config \
+#       recovery=two_gpu \
+#       experiment_name=my_experiment
 
 # @package _global_
 
@@ -9,23 +22,26 @@ dataset:
   split: "train"
   streaming: true
   text_column: "text"
-  max_length: 2048
+  max_length: 1024
   num_samples: null  # Full dataset
 
 # Training hyperparameters
 training:
   # Batch size and accumulation
-  per_device_train_batch_size: 1  # Start with 1, can increase to 2 if memory allows
-  gradient_accumulation_steps: 16  # Effective batch size = 1 * 2 * 16 = 32
+  per_device_train_batch_size: 1  # Keep at 1 for memory safety
+  gradient_accumulation_steps: 32  # Increased to maintain effective batch size of 64
+  # Note: If you encounter OOM, the issue is likely NOT batch size (already at minimum)
+  # Instead, try: accelerate_config_2xa100_cpu_offload.yaml
 
   # Learning rate and schedule
   learning_rate: 2e-5
   lr_scheduler_type: "cosine"
   warmup_steps: 500
 
-  # Training duration
-  num_train_epochs: 1
-  max_steps: -1
+  # Training duration (specify in tokens for easier budgeting)
+  max_tokens: 1_000_000_000  # 1B tokens (will be converted to max_steps automatically)
+  num_train_epochs: 1  # Ignored when using streaming datasets
+  max_steps: null  # Will be calculated from max_tokens (or set explicitly to override)
 
   # Optimization
   optim: "adamw_torch"
@@ -38,7 +54,7 @@ training:
 
   # Checkpointing
   save_steps: 500
-  save_total_limit: 5
+  save_total_limit: null  # Save all checkpoints (async eval will manage cleanup)
 
   # Logging
   logging_steps: 10

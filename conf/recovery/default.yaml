@@ -59,7 +59,7 @@ fsdp:
   fsdp_sharding_strategy: "full_shard"  # Full ZeRO-3 style sharding
   fsdp_offload_params: false  # Set to true if you need to offload to CPU
   fsdp_state_dict_type: "full_state_dict"  # How to save checkpoints
-  fsdp_transformer_layer_cls_to_wrap: null  # Will be auto-detected
+  fsdp_transformer_layer_cls_to_wrap: null  # Use model-provided _no_split_modules for auto-wrap
   fsdp_backward_prefetch: "backward_pre"
   fsdp_forward_prefetch: false
   fsdp_use_orig_params: true  # Required for gradient checkpointing compatibility

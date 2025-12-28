@@ -28,6 +28,12 @@ Usage:
 
 For 2x 80GB A100s, see accelerate_config_2xa100.yaml and conf/recovery/two_gpu.yaml
 """
+# IMPORTANT: Disable torch.dynamo BEFORE any torch imports
+# This is required for FSDP CPU offload to work correctly
+# import torch._dynamo
+# torch._dynamo.config.suppress_errors = True
+# # Set the config flag directly - this is the correct way to globally disable
+# torch._dynamo.config.disable = True
 
 import os
 import sys
@@ -54,6 +60,22 @@ from src.recovery_trainer import (
 )
 from src.model_utils import load_compressed_model
 
+
+# def check_dynamo_status():
+#     """Check and log torch.dynamo status."""
+#     logger.info("=" * 80)
+#     logger.info("Torch Dynamo Status:")
+#     logger.info(f"  torch._dynamo.config.disable: {torch._dynamo.config.disable}")
+#     logger.info(f"  torch._dynamo.config.suppress_errors: {torch._dynamo.config.suppress_errors}")
+#     logger.info(f"  TORCHDYNAMO_DISABLE env var: {os.environ.get('TORCHDYNAMO_DISABLE', 'not set')}")
+#     logger.info(f"  TORCH_COMPILE_DISABLE env var: {os.environ.get('TORCH_COMPILE_DISABLE', 'not set')}")
+    
+#     # Check if dynamo is actually disabled
+#     is_disabled = torch._dynamo.config.disable or os.environ.get('TORCHDYNAMO_DISABLE') == '1'
+#     logger.info(f"  Dynamo effectively disabled: {is_disabled}")
+#     logger.info("=" * 80)
+#     return is_disabled
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -65,9 +87,9 @@ def setup_fsdp_args(cfg: DictConfig, training_args_dict: dict) -> dict:
     """
     Configure FSDP settings for TrainingArguments.
 
-    IMPORTANT: When using Accelerate with FSDP, FSDP should be configured in
-    the Accelerate config file, NOT in TrainingArguments. This function checks
-    for Accelerate and skips TrainingArguments FSDP config if Accelerate is detected.
+    NOTE: We still populate TrainingArguments with FSDP settings even when the
+    script is launched via Accelerate. Without this, Trainer can fall back to
+    DDP and fully replicate the model, causing OOM.
 
     Args:
         cfg: Hydra configuration
@@ -84,22 +106,24 @@ def setup_fsdp_args(cfg: DictConfig, training_args_dict: dict) -> dict:
     if using_accelerate:
         logger.info("=" * 80)
         logger.info("ACCELERATE DETECTED:")
-        logger.info("  FSDP will be configured by Accelerate, not TrainingArguments")
-        logger.info("  Skipping TrainingArguments FSDP configuration to avoid conflicts")
+        logger.info("  Applying FSDP settings to TrainingArguments to ensure sharding is enabled")
+        logger.info("  (Accelerate launch alone does not configure Trainer FSDP)")
         logger.info("=" * 80)
-        return training_args_dict
 
     if not cfg.recovery.fsdp.enabled:
         logger.info("FSDP is disabled")
         return training_args_dict
 
-    logger.info("Configuring FSDP via TrainingArguments (NOT using Accelerate)")
+    logger.info("Configuring FSDP via TrainingArguments")
 
     # Basic FSDP configuration
     fsdp_config = cfg.recovery.fsdp
 
-    # Set FSDP strategy
-    training_args_dict["fsdp"] = fsdp_config.fsdp_sharding_strategy
+    # Set FSDP strategy + auto wrap (and offload if enabled)
+    fsdp_flags = [fsdp_config.fsdp_sharding_strategy, "auto_wrap"]
+    if fsdp_config.fsdp_offload_params:
+        fsdp_flags.append("offload")
+    training_args_dict["fsdp"] = " ".join(fsdp_flags)
 
     # FSDP-specific settings
     training_args_dict["fsdp_config"] = {
@@ -174,6 +198,8 @@ def load_model_and_tokenizer(cfg: DictConfig):
             trust_remote_code=cfg.recovery.model.trust_remote_code
         )
         logger.info("Compressed model loaded successfully")
+        logger.info(f"Model dtype: {next(model.parameters()).dtype}")   
+        logger.info(f"total parameters: {sum(p.numel() for p in model.parameters())/10**9:.2f}B")
     except Exception as e:
         logger.error(f"Failed to load compressed model: {e}")
         raise
@@ -222,6 +248,7 @@ def main(cfg: DictConfig):
     Args:
         cfg: Hydra configuration
     """
+    # assert check_dynamo_status()
     # Print configuration
     logger.info("="*80)
     logger.info("Recovery Training Configuration:")

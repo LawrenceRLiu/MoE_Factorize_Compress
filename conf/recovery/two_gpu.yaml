@@ -22,16 +22,15 @@ dataset:
   split: "train"
   streaming: true
   text_column: "text"
-  max_length: 1024
+  max_length: 2048
   num_samples: null  # Full dataset
 
 # Training hyperparameters
 training:
   # Batch size and accumulation
   per_device_train_batch_size: 1  # Keep at 1 for memory safety
-  gradient_accumulation_steps: 32  # Increased to maintain effective batch size of 64
-  # Note: If you encounter OOM, the issue is likely NOT batch size (already at minimum)
-  # Instead, try: accelerate_config_2xa100_cpu_offload.yaml
+  gradient_accumulation_steps: 1  # Adjusted to maintain similar token budget with seq_len=2048
+  # Effective batch: 1 * 32 * 2 GPUs = 64 sequences, or 64*2048 = 131k tokens/batch
 
   # Learning rate and schedule
   learning_rate: 2e-5
@@ -44,7 +43,11 @@ training:
   max_steps: null  # Will be calculated from max_tokens (or set explicitly to override)
 
   # Optimization
-  optim: "adamw_torch"
+  # Use torchao 8-bit AdamW for ~75% optimizer memory reduction
+  # This uses PyTorch's official torchao library (not bitsandbytes)
+  # torchao optimizers are FSDP-compatible
+  # Requires: pip install torchao
+  optim: "adamw_torch_8bit"
   weight_decay: 0.01
   max_grad_norm: 1.0
 
@@ -57,7 +60,7 @@ training:
   save_total_limit: null  # Save all checkpoints (async eval will manage cleanup)
 
   # Logging
-  logging_steps: 10
+  logging_steps: 1
   logging_first_step: true
 
   # Evaluation
@@ -76,7 +79,7 @@ fsdp:
   fsdp_sharding_strategy: "full_shard"  # ZeRO-3: shard params, gradients, optimizer states
   fsdp_offload_params: false  # No CPU offload needed for 2x80GB A100s
   fsdp_state_dict_type: "full_state_dict"
-  fsdp_transformer_layer_cls_to_wrap: null  # Auto-detect
+  fsdp_transformer_layer_cls_to_wrap: null  # Use model-provided _no_split_modules for auto-wrap
   fsdp_backward_prefetch: "backward_pre"
   fsdp_forward_prefetch: false
   fsdp_use_orig_params: true  # Required for gradient checkpointing

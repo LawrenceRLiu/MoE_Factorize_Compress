@@ -47,7 +47,7 @@ fsdp_config:
 
   # Auto-wrap policy: wrap each transformer layer
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-  fsdp_transformer_layer_cls_to_wrap: null  # Auto-detect from model
+  fsdp_transformer_layer_cls_to_wrap: null  # Use model _no_split_modules to detect decoder blocks
 
   # Prefetching for better performance
   fsdp_backward_prefetch: BACKWARD_PRE

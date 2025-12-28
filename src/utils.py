@@ -7,7 +7,7 @@ import random
 import numpy as np
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 import json
 import gc
 
@@ -33,6 +33,27 @@ def human_readable(num: Union[int, float], decimals=2)-> str:
 
     return f"{num:.{decimals}f}{suffixes[idx]}"
 
+
+def dict_to_str(d: Dict[str, Any]) -> str:
+    """
+    Convert a dictionary to a formatted string.
+
+    Args:
+        d: Input dictionary
+
+    Returns:
+        Formatted string
+    """
+    def helper(d: Dict[str, Any]) -> List[str]:
+        lines = []
+        for key, value in d.items():
+            if isinstance(value, dict):
+                lines.append(f"{key}:")
+                lines.extend(["\t" + line for line in helper(value)])
+            else:
+                lines.append(f"{key}: {value}")
+        return lines
+    return "\n".join(helper(d))
 
 def clean():
     """Clean up GPU memory."""

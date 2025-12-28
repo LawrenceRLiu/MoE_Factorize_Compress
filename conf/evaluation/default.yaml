@@ -3,7 +3,7 @@
 # Tasks to evaluate
 tasks:
   wikitext: -1 # perplexity evaluation
-  # mmlu: 5 # five shot evaluation
+  mmlu: 5 # five shot evaluation
   # gsm8k: 8 # eight shot evaluation
 
 

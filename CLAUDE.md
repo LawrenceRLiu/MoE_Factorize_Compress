@@ -130,6 +130,12 @@ python scripts/run_recovery_training.py \
    - Script auto-calculates `max_steps` based on batch size, sequence length, and num GPUs
    - Makes it easier to compare training budgets across different configurations
 
+5. **Staged Learning Rate Training**: Support for progressive unfreezing and differential learning rates
+   - Configure via `lr_schedule` in recovery config
+   - Different LR multipliers for different parameter groups (cores, wrappers, attention, etc.)
+   - Automatic stage transitions during training
+   - See [STAGED_LR_TRAINING.md](STAGED_LR_TRAINING.md) for detailed guide
+
 ## Configuration Management
 
 **Uses Hydra** for configuration management. Override via command line:
@@ -238,6 +244,7 @@ Install additional packages as needed: `pip install <package>`
 For detailed information, see:
 - [ResearchSpec.md](ResearchSpec.md) - Mathematical formulation and algorithms
 - [RECOVERY_TRAINING.md](RECOVERY_TRAINING.md) - Complete Phase 2 guide
+- [STAGED_LR_TRAINING.md](STAGED_LR_TRAINING.md) - **NEW**: Staged learning rate training with progressive unfreezing
 - [TWO_GPU_SETUP.md](TWO_GPU_SETUP.md) - FSDP vs other parallelism strategies
 - [FSDP_OPTIMIZER_COMPATIBILITY.md](FSDP_OPTIMIZER_COMPATIBILITY.md) - **IMPORTANT**: Why bitsandbytes optimizers don't work with FSDP
 - [OPTIMIZER_MEMORY_GUIDE.md](OPTIMIZER_MEMORY_GUIDE.md) - General optimizer memory optimization strategies

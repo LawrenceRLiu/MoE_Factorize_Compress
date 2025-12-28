@@ -28,17 +28,17 @@ dataset:
 # Training hyperparameters
 training:
   # Batch size and accumulation
-  per_device_train_batch_size: 1  # Keep at 1 for memory safety
-  gradient_accumulation_steps: 1  # Adjusted to maintain similar token budget with seq_len=2048
+  per_device_train_batch_size: 4  # Keep at 1 for memory safety
+  gradient_accumulation_steps: 64  # For debugging rn # Adjusted to maintain similar token budget with seq_len=2048
   # Effective batch: 1 * 32 * 2 GPUs = 64 sequences, or 64*2048 = 131k tokens/batch
 
   # Learning rate and schedule
-  learning_rate: 2e-5
+  learning_rate: 1e-4
   lr_scheduler_type: "cosine"
-  warmup_steps: 500
+  warmup_steps: 100
 
   # Training duration (specify in tokens for easier budgeting)
-  max_tokens: 1_000_000_000  # 1B tokens (will be converted to max_steps automatically)
+  max_tokens: 10_000_000_000  # 10B tokens (will be converted to max_steps automatically)
   num_train_epochs: 1  # Ignored when using streaming datasets
   max_steps: null  # Will be calculated from max_tokens (or set explicitly to override)
 
@@ -97,3 +97,38 @@ wandb:
   run_name: null
   tags: ["recovery", "pretraining", "2-gpu"]
   notes: "Recovery training on 2x A100 GPUs with FSDP"
+
+# Learning Rate Schedule - Staged Training
+# Stage 1: Train only wrappers and cores (freeze attention, embeddings, etc.)
+# Stage 2: Fine-tune everything with smaller LR
+lr_schedule:
+  #warm up the cores so wrappers first adapt
+  - fraction: 0.4  # First 40% of training
+    base_lr_multiplier: 0.0  # Freeze everything by default
+    param_patterns:
+      # Shared cores in MoE layers
+      - pattern: ".*\\.experts\\.(gate_shared_core|up_shared_core|down_shared_core)\\.core$"
+        lr_multiplier: 0.1
+      # Low-rank wrappers (U and V matrices)
+      - pattern: ".*\\.experts\\.(gate_shared_core|up_shared_core|down_shared_core)\\.experts\\.\\d+\\.(input_wrapper|output_wrapper)\\.(U|V)$"
+        lr_multiplier: 1.0
+  #then jack up the lr for the cores to full lr
+  - fraction: 0.4  # second 40% of training
+    base_lr_multiplier: 0.0  # Freeze everything by default
+    param_patterns:
+      # Shared cores in MoE layers
+      - pattern: ".*\\.experts\\.(gate_shared_core|up_shared_core|down_shared_core)\\.core$"
+        lr_multiplier: 1.0
+      # Low-rank wrappers (U and V matrices)
+      - pattern: ".*\\.experts\\.(gate_shared_core|up_shared_core|down_shared_core)\\.experts\\.\\d+\\.(input_wrapper|output_wrapper)\\.(U|V)$"
+        lr_multiplier: 1.0
+  # finish off with finetuning everything at small lr
+  - fraction: 0.2  # Second 50% of training
+    base_lr_multiplier: 0.01  # 1% of base LR for attention, embeddings, etc.
+    param_patterns:
+      # Keep full LR for cores
+      - pattern: ".*\\.experts\\.(gate_shared_core|up_shared_core|down_shared_core)\\.core$"
+        lr_multiplier: 1.0
+      # Keep full LR for wrappers
+      - pattern: ".*\\.experts\\.(gate_shared_core|up_shared_core|down_shared_core)\\.experts\\.\\d+\\.(input_wrapper|output_wrapper)\\.(U|V)$"
+        lr_multiplier: 1.0

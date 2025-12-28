@@ -59,6 +59,10 @@ from src.recovery_trainer import (
     create_recovery_trainer,
 )
 from src.model_utils import load_compressed_model
+from src.param_group_scheduler import (
+    create_param_group_scheduler,
+    ParameterGroupSchedulerCallback,
+)
 
 
 # def check_dynamo_status():
@@ -383,6 +387,24 @@ def main(cfg: DictConfig):
     # Create TrainingArguments
     training_args = TrainingArguments(**training_args_dict)
 
+    # Create parameter group scheduler if configured
+    param_scheduler = None
+    scheduler_callback = None
+    if hasattr(cfg.recovery, 'lr_schedule') and cfg.recovery.lr_schedule is not None:
+        logger.info("Creating parameter group scheduler")
+        param_scheduler = create_param_group_scheduler(
+            lr_schedule_config=cfg.recovery.lr_schedule,
+            total_steps=max_steps,
+            base_lr=training_config.learning_rate,
+            model=model
+        )
+
+        if param_scheduler is not None:
+            scheduler_callback = ParameterGroupSchedulerCallback(param_scheduler)
+            logger.info("Parameter group scheduler created successfully")
+    else:
+        logger.info("No lr_schedule configured - using standard single learning rate")
+
     # Create trainer
     logger.info("Creating RecoveryTrainer")
     trainer = create_recovery_trainer(
@@ -393,6 +415,11 @@ def main(cfg: DictConfig):
         checkpoints_dir=str(checkpoints_dir),
         base_model_name=cfg.model.name,
     )
+
+    # Add scheduler callback if created
+    if scheduler_callback is not None:
+        logger.info("Adding parameter group scheduler callback to trainer")
+        trainer.add_callback(scheduler_callback)
 
     # Start training
     logger.info("="*80)

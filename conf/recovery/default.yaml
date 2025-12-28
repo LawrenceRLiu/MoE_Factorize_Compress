@@ -77,3 +77,24 @@ wandb:
   run_name: null  # Will be auto-generated if null
   tags: ["recovery", "pretraining"]
   notes: "Recovery pretraining on compressed MoE model"
+
+# Learning Rate Schedule (optional)
+# Enables staged training with different learning rates for different parameter groups
+# If null or empty, uses standard single learning rate for all parameters
+lr_schedule: null  # Set to a list of stage configs to enable staged training
+  # Example (commented out):
+  # - fraction: 0.5  # First 50% of training
+  #   base_lr_multiplier: 0.0  # Freeze everything by default
+  #   param_patterns:
+  #     - pattern: ".*\\.core$"  # Shared cores
+  #       lr_multiplier: 1.0
+  #     - pattern: ".*\\.experts\\.\\d+\\.(input_wrapper|output_wrapper)\\.(U|V)$"  # Low-rank wrappers
+  #       lr_multiplier: 1.0
+  #
+  # - fraction: 0.5  # Second 50% of training
+  #   base_lr_multiplier: 0.1  # 10% LR for unfrozen params
+  #   param_patterns:
+  #     - pattern: ".*\\.core$"
+  #       lr_multiplier: 1.0  # Full LR for cores
+  #     - pattern: ".*\\.experts\\.\\d+\\.(input_wrapper|output_wrapper)\\.(U|V)$"
+  #       lr_multiplier: 1.0  # Full LR for wrappers

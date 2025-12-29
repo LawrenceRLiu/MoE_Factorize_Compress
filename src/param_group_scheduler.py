@@ -172,19 +172,37 @@ class ParameterGroupScheduler:
         logger.warning(f"Step {step} exceeds total training steps; using last stage")
         return len(self.stage_boundaries) - 1, self.stage_boundaries[-1]
 
-    def update_optimizer_param_groups(self, optimizer: torch.optim.Optimizer, step: int) -> Dict[str, float]:
+    def update_optimizer_param_groups(self, optimizer: torch.optim.Optimizer, step: int, base_lr: Optional[float] = None) -> Dict[str, float]:
         """
         Update optimizer parameter groups based on current step.
+
+        This method applies parameter-specific LR multipliers to a base learning rate.
+        The base LR typically comes from the HuggingFace LR scheduler (e.g., cosine with warmup).
 
         Args:
             optimizer: The optimizer to update
             step: Current training step
+            base_lr: Base learning rate to apply multipliers to. If None, uses self.base_lr.
+                     In practice, this should be the LR from the first param group after
+                     the HuggingFace scheduler has updated it.
 
         Returns:
             Dictionary mapping parameter group names to their new learning rates
         """
         stage_idx, boundary = self.get_current_stage(step)
         stage_config = boundary['config']
+
+        # If no base_lr provided, try to infer it from the first param group
+        # (which has been updated by HuggingFace's LR scheduler)
+        if base_lr is None:
+            if len(optimizer.param_groups) > 0:
+                first_lr = optimizer.param_groups[0]['lr']
+                if isinstance(first_lr, torch.Tensor):
+                    base_lr = first_lr.item()
+                else:
+                    base_lr = first_lr
+            else:
+                base_lr = self.base_lr
 
         # Track which parameters get which learning rates for logging
         lr_assignments = {}
@@ -203,7 +221,7 @@ class ParameterGroupScheduler:
 
                 # Get LR multiplier for this parameter
                 lr_multiplier = stage_config.get_lr_multiplier(param_name)
-                new_lr = self.base_lr * lr_multiplier
+                new_lr = base_lr * lr_multiplier
 
                 # Update the parameter group
                 # Some optimizers (like torchao's AdamW8bit) use tensor LRs
@@ -289,8 +307,21 @@ class ParameterGroupSchedulerCallback(TrainerCallback):
     """
     HuggingFace Trainer callback that applies parameter group scheduling.
 
-    This callback updates optimizer learning rates at the beginning of each step
-    and logs transitions to WandB.
+    This callback applies per-parameter LR multipliers to work alongside the HuggingFace
+    LR scheduler (e.g., cosine with warmup).
+
+    CRITICAL EXECUTION ORDER:
+    The HuggingFace Trainer's _inner_training_loop method does this (simplified):
+    1. self.callback_handler.on_step_begin(...)
+    2. tr_loss_step = self.training_step(model, inputs)
+       - Inside training_step: forward, backward, optimizer.step()
+    3. self.lr_scheduler.step()  ← LR updated AFTER optimizer step!
+    4. self.callback_handler.on_step_end(...)
+
+    This means:
+    - The LR scheduler updates the LR for the NEXT step (step N+1)
+    - We apply our multipliers in on_step_end AFTER the scheduler has run
+    - These multiplied LRs will be used in the next training_step (step N+1)
 
     Args:
         scheduler: The ParameterGroupScheduler instance
@@ -300,11 +331,73 @@ class ParameterGroupSchedulerCallback(TrainerCallback):
         self.scheduler = scheduler
         self.current_stage = -1
 
-    def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
-        """Called at the beginning of each training step."""
+    def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        """
+        Called at the beginning of training to set initial learning rates.
+
+        This ensures that step 0 has the correct multiplied LRs before the first training_step.
+        """
         optimizer = kwargs.get('optimizer')
+
         if optimizer is None:
-            logger.warning("No optimizer found in callback kwargs")
+            logger.warning("Optimizer not available in on_train_begin")
+            return
+
+        # Apply multipliers for step 0
+        step = 0
+
+        # IMPORTANT: Use the configured base_lr, not the optimizer's current LR
+        # The LR scheduler sets all param groups to 0.0 during warmup initialization
+        # But we want to apply multipliers to the actual configured LR
+        base_lr = self.scheduler.base_lr
+
+        logger.info("=" * 80)
+        logger.info("Setting initial learning rates for step 0")
+        logger.info(f"Using configured base LR: {base_lr}")
+
+        # Also log what the optimizer currently has (for debugging)
+        if len(optimizer.param_groups) > 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            if isinstance(current_lr, torch.Tensor):
+                current_lr = current_lr.item()
+            logger.info(f"Optimizer's current LR (before our multipliers): {current_lr}")
+
+        # Log the initial stage info
+        stage_idx, boundary = self.scheduler.get_current_stage(step)
+        self.current_stage = stage_idx
+        logger.info(f"Starting in STAGE {stage_idx}")
+        logger.info(f"  Stage runs from step {boundary['start_step']} to {boundary['end_step']}")
+        logger.info(f"  Base LR multiplier: {boundary['config'].base_lr_multiplier}")
+
+        summary = self.scheduler.get_param_group_summary(step)
+        logger.info("  Initial Parameter Group Summary:")
+        logger.info(f"=" * 40)
+        logger.info(f"{dict_to_str(summary)}")
+        logger.info("=" * 40)
+
+        # Apply multipliers for step 0
+        self.scheduler.update_optimizer_param_groups(optimizer, step, base_lr=base_lr)
+        logger.info("Initial learning rates applied")
+        logger.info("=" * 80)
+
+    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        """
+        Called at the end of each training step, AFTER lr_scheduler.step() has been called.
+
+        At this point:
+        - optimizer.step() has already been called (using LRs from previous on_step_end)
+        - lr_scheduler.step() has just set all param groups to the new base LR
+        - We now apply our multipliers to prepare for the NEXT training step
+
+        This ensures:
+        1. lr_scheduler.step() doesn't overwrite our multipliers
+        2. Our multiplied LRs are ready for the next training_step
+        3. Logging (which happens in on_log) will see the correct LRs
+        """
+        optimizer = kwargs.get('optimizer')
+
+        if optimizer is None:
+            # Optimizer not created yet
             return
 
         step = state.global_step
@@ -326,14 +419,25 @@ class ParameterGroupSchedulerCallback(TrainerCallback):
             logger.info("=" * 40)
             logger.info("=" * 80)
 
-        # Update optimizer parameter groups
-        self.scheduler.update_optimizer_param_groups(optimizer, step)
+        # Get the base LR that was just set by lr_scheduler.step()
+        # All param groups should have the same LR at this point (before we apply multipliers)
+        base_lr = None
+        if len(optimizer.param_groups) > 0:
+            first_lr = optimizer.param_groups[0]['lr']
+            if isinstance(first_lr, torch.Tensor):
+                base_lr = first_lr.item()
+            else:
+                base_lr = first_lr
+
+        # Apply our per-parameter multipliers for the NEXT step
+        self.scheduler.update_optimizer_param_groups(optimizer, step, base_lr=base_lr)
 
     def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
-        """Called when logging - add parameter group info to logs."""
+        """Called when logging - add parameter group info to logs and fix the reported LR."""
         if logs is None:
             return
 
+        optimizer = kwargs.get('optimizer')
         step = state.global_step
         stage_idx, _ = self.scheduler.get_current_stage(step)
 
@@ -344,6 +448,41 @@ class ParameterGroupSchedulerCallback(TrainerCallback):
         summary = self.scheduler.get_param_group_summary(step)
         for lr_mult, count in summary['num_params_by_lr'].items():
             logs[f'param_schedule/lr_mult_{lr_mult:.3f}_count'] = count
+
+        # IMPORTANT: Fix the 'learning_rate' that Trainer reports
+        # Since we apply multipliers in on_step_end (after lr_scheduler.step()),
+        # the optimizer param groups should already have the correct multiplied LRs
+        # We report the maximum LR being used (most informative for multi-LR training)
+        if optimizer is not None and len(optimizer.param_groups) > 0:
+            max_lr = 0.0
+            total_lr = 0.0
+            total_params = 0
+
+            for param_group in optimizer.param_groups:
+                lr = param_group['lr']
+                if isinstance(lr, torch.Tensor):
+                    lr = lr.item()
+
+                num_params = len(param_group['params'])
+                max_lr = max(max_lr, lr)
+                total_lr += lr * num_params
+                total_params += num_params
+
+            # Override the default 'learning_rate' with the max LR
+            # Also log the average LR weighted by number of parameters
+            logs['learning_rate'] = max_lr
+            logs['learning_rate_avg'] = total_lr / total_params if total_params > 0 else 0.0
+
+            # Log individual LRs for different groups (up to 5 for visibility)
+            unique_lrs = set()
+            for param_group in optimizer.param_groups[:min(5, len(optimizer.param_groups))]:
+                lr = param_group['lr']
+                if isinstance(lr, torch.Tensor):
+                    lr = lr.item()
+                unique_lrs.add(lr)
+
+            for i, lr in enumerate(sorted(unique_lrs, reverse=True)):
+                logs[f'lr/group_{i}'] = lr
 
 
 def create_param_group_scheduler(

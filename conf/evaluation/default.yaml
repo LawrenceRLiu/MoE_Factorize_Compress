@@ -3,8 +3,12 @@
 # Tasks to evaluate
 tasks:
   wikitext: -1 # perplexity evaluation
-  mmlu: 5 # five shot evaluation
-  # gsm8k: 8 # eight shot evaluation
+  mmlu: 5 #world knowledge
+  hellaswag: 10 #common sense
+  piqa: 5 #physical commonsense
+  arc_easy: 25 #grade school science
+  arc_challenge: 25 #grade school science
+  gsm8k: 5 #math
 
 
 # Evaluation settings

@@ -12,6 +12,8 @@ import logging
 import sys
 import os
 import torch
+import json
+import wandb
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
@@ -46,6 +48,23 @@ def main(cfg: DictConfig):
     # Print configuration
     logger.info("\nConfiguration:")
     logger.info(OmegaConf.to_yaml(cfg))
+    
+    # load the wandb if available
+    config_path = Path(cfg.output.config_dir) / "wandb_run_info.json"
+    wandb_run = None
+    if config_path.exists():
+        with open(config_path, "r") as f:
+            wandb_info = json.load(f)
+        logger.info(f"WandB Run Info: {wandb_info}")
+        #initialize wandb
+        wandb_run = wandb.init(
+            project=wandb_info["project"],
+            entity=wandb_info["entity"],
+            name=wandb_info["name"],
+            id=wandb_info["id"],
+            resume="must",
+        )
+        logger.info(f"Resumed WandB run: {wandb_run.name} (ID: {wandb_run.id})")
 
 
     # Create eval config
@@ -59,6 +78,7 @@ def main(cfg: DictConfig):
         n_gpus=N_GPUS,
         n_gpus_per_model=cfg.evaluation.async_eval.n_gpus_per_model,
         eval_interval=cfg.evaluation.async_eval.eval_interval,
+        wandb_run=wandb_run
     )
         
 

@@ -142,6 +142,7 @@ class RecoveryTrainer(Trainer):
         self,
         checkpoints_dir: str,
         base_model_name: str,
+        lr_schedule_config: Optional[list] = None,
         *args,
         **kwargs
     ):
@@ -149,8 +150,12 @@ class RecoveryTrainer(Trainer):
         Args:
             checkpoints_dir: Directory to save checkpoints
             base_model_name: Name of the base model
+            lr_schedule_config: Optional staged LR schedule configuration
             *args, **kwargs: Arguments for Trainer
         """
+        # Store LR schedule config for create_scheduler
+        self.lr_schedule_config = lr_schedule_config
+
         # Add checkpoint callback
         callbacks = kwargs.get('callbacks', [])
         callbacks.append(
@@ -162,34 +167,46 @@ class RecoveryTrainer(Trainer):
 
         logger.info("RecoveryTrainer initialized")
         logger.info(f"Checkpoints will be saved to: {checkpoints_dir}")
+        if lr_schedule_config:
+            logger.info("Staged LR schedule will be applied")
 
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+    def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):
         """
-        Compute standard language modeling loss.
+        Create the learning rate scheduler.
 
-        This is the default HuggingFace implementation - we include it here
-        for clarity and potential future customization.
+        If lr_schedule_config is provided, wraps the base scheduler with our custom
+        parameter-specific scheduler. Otherwise, uses the standard HF scheduler.
 
         Args:
-            model: The model
-            inputs: Batch inputs
-            return_outputs: Whether to return model outputs
-            num_items_in_batch: Number of items in batch (for newer transformers versions)
+            num_training_steps: Number of training steps
+            optimizer: The optimizer (if None, uses self.optimizer)
 
         Returns:
-            Loss tensor (and optionally outputs)
+            Learning rate scheduler
         """
-        # Standard language modeling: labels are already in inputs
-        if "labels" not in inputs:
-            inputs["labels"] = inputs["input_ids"].clone()
+        # Create the base scheduler using HF's method
+        base_scheduler = super().create_scheduler(num_training_steps, optimizer)
 
-        # Forward pass - model will compute loss internally
-        outputs = model(**inputs)
-        loss = outputs.loss
+        # If we have a staged LR schedule config, wrap the base scheduler
+        if self.lr_schedule_config:
+            logger.info("Wrapping base scheduler with ParameterGroupLRScheduler")
+            from src.custom_lr_scheduler import create_parameter_group_scheduler
 
-        if return_outputs:
-            return loss, outputs
-        return loss
+            custom_scheduler = create_parameter_group_scheduler(
+                optimizer=self.optimizer if optimizer is None else optimizer,
+                base_scheduler=base_scheduler,
+                lr_schedule_config=self.lr_schedule_config,
+                total_steps=num_training_steps,
+                model=self.model,
+            )
+
+            if custom_scheduler is not None:
+                logger.info("Using custom parameter group scheduler")
+                return custom_scheduler
+
+            logger.warning("Failed to create custom scheduler, falling back to base scheduler")
+
+        return base_scheduler
 
 
 def prepare_recovery_dataset(
@@ -291,6 +308,7 @@ def create_recovery_trainer(
     training_args,
     checkpoints_dir: str,
     base_model_name: str,
+    lr_schedule_config: Optional[list] = None,
 ) -> RecoveryTrainer:
     """
     Create a RecoveryTrainer instance.
@@ -302,6 +320,7 @@ def create_recovery_trainer(
         training_args: TrainingArguments
         checkpoints_dir: Directory to save checkpoints
         base_model_name: Name of the base model
+        lr_schedule_config: Optional staged LR schedule configuration
 
     Returns:
         RecoveryTrainer instance
@@ -309,6 +328,7 @@ def create_recovery_trainer(
     trainer = RecoveryTrainer(
         checkpoints_dir=checkpoints_dir,
         base_model_name=base_model_name,
+        lr_schedule_config=lr_schedule_config,
         model=model,
         args=training_args,
         train_dataset=train_dataset,

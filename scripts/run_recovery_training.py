@@ -38,6 +38,7 @@ For 2x 80GB A100s, see accelerate_config_2xa100.yaml and conf/recovery/two_gpu.y
 import os
 import sys
 import logging
+import json
 from pathlib import Path
 
 # Add src to path
@@ -59,10 +60,6 @@ from src.recovery_trainer import (
     create_recovery_trainer,
 )
 from src.model_utils import load_compressed_model
-from src.param_group_scheduler import (
-    create_param_group_scheduler,
-    ParameterGroupSchedulerCallback,
-)
 
 
 # def check_dynamo_status():
@@ -235,13 +232,29 @@ def setup_wandb(cfg: DictConfig):
 
     logger.info(f"Initializing WandB: project={cfg.wandb_project}, run={run_name}")
 
-    wandb.init(
+    run = wandb.init(
         project=cfg.wandb_project,
         name=run_name,
         config=OmegaConf.to_container(cfg, resolve=True),
         tags=cfg.recovery.wandb.tags,
         notes=cfg.recovery.wandb.notes,
     )
+    config_dir = Path(cfg.output.config_dir)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    run_info_path = config_dir / "wandb_run_info.json"
+    with run_info_path.open("w") as f:
+        json.dump(
+            {
+                "id": run.id,
+                "name": run.name,
+                "project": run.project,
+                "entity": run.entity,
+                "url": run.url,
+            },
+            f,
+        )
+    logger.info(f"WandB run info saved to: {run_info_path}")
+    
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")
@@ -387,21 +400,11 @@ def main(cfg: DictConfig):
     # Create TrainingArguments
     training_args = TrainingArguments(**training_args_dict)
 
-    # Create parameter group scheduler if configured
-    param_scheduler = None
-    scheduler_callback = None
+    # Get LR schedule config if configured
+    lr_schedule_config = None
     if hasattr(cfg.recovery, 'lr_schedule') and cfg.recovery.lr_schedule is not None:
-        logger.info("Creating parameter group scheduler")
-        param_scheduler = create_param_group_scheduler(
-            lr_schedule_config=cfg.recovery.lr_schedule,
-            total_steps=max_steps,
-            base_lr=training_config.learning_rate,
-            model=model
-        )
-
-        if param_scheduler is not None:
-            scheduler_callback = ParameterGroupSchedulerCallback(param_scheduler)
-            logger.info("Parameter group scheduler created successfully")
+        logger.info("Staged LR schedule configured - will use custom scheduler")
+        lr_schedule_config = cfg.recovery.lr_schedule
     else:
         logger.info("No lr_schedule configured - using standard single learning rate")
 
@@ -414,12 +417,8 @@ def main(cfg: DictConfig):
         training_args=training_args,
         checkpoints_dir=str(checkpoints_dir),
         base_model_name=cfg.model.name,
+        lr_schedule_config=lr_schedule_config,
     )
-
-    # Add scheduler callback if created
-    if scheduler_callback is not None:
-        logger.info("Adding parameter group scheduler callback to trainer")
-        trainer.add_callback(scheduler_callback)
 
     # Start training
     logger.info("="*80)

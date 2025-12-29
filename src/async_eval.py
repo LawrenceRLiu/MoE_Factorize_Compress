@@ -105,6 +105,7 @@ class EvalConfig:
     n_gpus: int = 1
     n_gpus_per_model: int = 1  # GPUs per model for parallelization
     eval_interval: int = 60  # Seconds between checks
+    wandb_run: Optional[object] = None  # wandb run object for logging
     
     def __post_init__(self):
         # Ensure directories exist
@@ -134,10 +135,76 @@ class Evaluator:
 
     def __init__(self, config: EvalConfig):
         self.config = config
-        #TODO:: Wandb integration
-        
-    def _evaluate(self, model_path: Optional[Path] = None) -> Dict:
-        
+        self.wandb_run = config.wandb_run
+
+        # Set up wandb metrics if enabled
+        if self.wandb_run is not None:
+            # Define the iteration as the step metric
+            self.wandb_run.define_metric("iteration")
+            # Define all eval metrics to use iteration as x-axis (wildcard pattern)
+            self.wandb_run.define_metric("eval/*", step_metric="iteration")
+            self.wandb_run.define_metric("baseline/*", step_metric="iteration")
+
+    def _log_to_wandb(
+        self,
+        task_name: str,
+        fewshot: int,
+        task_results: Dict,
+        is_baseline: bool,
+        model_path: Union[str, Path]
+    ):
+        """
+        Log evaluation results to wandb.
+
+        Args:
+            task_name: Name of the evaluation task
+            fewshot: Number of few-shot examples
+            task_results: Results dictionary from lm_eval
+            is_baseline: Whether this is the baseline model evaluation
+            model_path: Path to the model being evaluated
+        """
+        # Extract metrics from the results
+        if "results" not in task_results:
+            logger.warning(f"No results found in task_results for {task_name}")
+            return
+
+        metrics = {}
+        for task, task_metrics in task_results["results"].items():
+            for metric_name, metric_value in task_metrics.items():
+                # Skip stderr metrics and alias
+                if "stderr" in metric_name or metric_name == "alias":
+                    continue
+
+                # Create metric key with appropriate prefix
+                if is_baseline:
+                    key = f"baseline/{task}/{metric_name}"
+                else:
+                    key = f"eval/{task}/{metric_name}"
+
+                metrics[key] = metric_value
+
+        # Determine the iteration for logging
+        if is_baseline:
+            # For baseline, we log at iteration 0
+            iteration = 0
+        else:
+            # Extract checkpoint step from model_path (e.g., checkpoint-1000 -> 1000)
+            checkpoint_name = Path(model_path).name
+            if checkpoint_name.startswith("checkpoint-"):
+                iteration = int(checkpoint_name.split("-")[1])
+            else:
+                logger.warning(f"Could not extract step from checkpoint name: {checkpoint_name}")
+                iteration = 0
+
+        # Add iteration to the metrics dict
+        metrics["iteration"] = iteration
+
+        # Log to wandb using the run object
+        self.wandb_run.log(metrics)
+        logger.info(f"Logged {len(metrics)-1} metrics to wandb at iteration {iteration}")
+
+    def _evaluate(self, model_path: Optional[Path] = None, is_baseline: bool = False) -> Dict:
+
         if model_path is None:
             #then we evaluate the original model
             model_path = self.config.original_model_name
@@ -170,9 +237,11 @@ class Evaluator:
             with open(results_paths[0], 'r') as f:
                 task_results = json.load(f)
             out[f"{task}_fewshot_{fewshot}"] = task_results
-            
-            #TODO: log to wandb if needed
-            
+
+            # Log to wandb if enabled
+            if self.wandb_run is not None:
+                self._log_to_wandb(task, fewshot, task_results, is_baseline, model_path)
+
         logger.info(f"Completed evaluation for model: {model_path}")
         logger.info(f"Results: {out}")
         return out
@@ -185,7 +254,7 @@ class Evaluator:
             Evaluation results
         """
         logger.info("Evaluating baseline model")
-        return self._evaluate(model_path=None)
+        return self._evaluate(model_path=None, is_baseline=True)
     
     def evaluate_checkpoint(self, checkpoint_path: Path) -> Dict:
         """
@@ -233,7 +302,7 @@ class Evaluator:
         evaluated_checkpoints: Set[Path] = set()
         
         # First evaluate the baseline model
-        # self.evaluate_baseline()
+        self.evaluate_baseline()
         
         logger.info("Starting checkpoint monitoring...")
         

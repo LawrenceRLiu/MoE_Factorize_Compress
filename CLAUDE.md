@@ -44,19 +44,7 @@ python scripts/run_compression.py experiment_name=<experiment_name>
 **Recommended approach using Accelerate:**
 ```bash
 # For 2x A100 GPUs (RECOMMENDED)
-CUDA_VISIBLE_DEVICES=0,1 accelerate launch --config_file accelerate_config_2xa100.yaml \
-    scripts/run_recovery_training.py \
-    --config-name config \
-    recovery=two_gpu \
-    experiment_name=<experiment_name> \
-    recovery.training.max_tokens=2_000_000_000
-
-# With CPU offload if OOM
-export ACCELERATE_CONFIG_FILE=accelerate_config_2xa100_cpu_offload.yaml
-CUDA_VISIBLE_DEVICES=0,1 accelerate launch scripts/run_recovery_training.py \
-    --config-name config \
-    recovery=two_gpu \
-    experiment_name=<experiment_name>
+CUDA_VISIBLE_DEVICES=0,1 python -m accelerate.commands.launch --config_file ./accelerate_config_2xa100.yaml     scripts/run_recovery_training.py     --config-name config     recovery=two_gpu |& tee logs/training.log
 ```
 
 **Alternative using torchrun:**

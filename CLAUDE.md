@@ -118,10 +118,12 @@ python scripts/run_recovery_training.py \
    - Script auto-calculates `max_steps` based on batch size, sequence length, and num GPUs
    - Makes it easier to compare training budgets across different configurations
 
-5. **Staged Learning Rate Training**: Support for progressive unfreezing and differential learning rates
+5. **Staged Learning Rate Training**: Custom LR scheduler for progressive unfreezing and differential learning rates
    - Configure via `lr_schedule` in recovery config
+   - Wraps HuggingFace's base scheduler (e.g., cosine with warmup)
    - Different LR multipliers for different parameter groups (cores, wrappers, attention, etc.)
    - Automatic stage transitions during training
+   - Clean integration - no callbacks needed
    - See [STAGED_LR_TRAINING.md](STAGED_LR_TRAINING.md) for detailed guide
 
 ## Configuration Management

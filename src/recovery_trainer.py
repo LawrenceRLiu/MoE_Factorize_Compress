@@ -216,7 +216,8 @@ def prepare_recovery_dataset(
     split: str = "train",
     streaming: bool = True,
     num_samples: Optional[int] = None,
-    text_column: str = "text"
+    text_column: str = "text",
+    subset_name: Optional[str] = None,
 ):
     """
     Prepare dataset for recovery training.
@@ -239,12 +240,21 @@ def prepare_recovery_dataset(
     logger.info(f"Streaming: {streaming}, Max length: {max_length}")
 
     # Load dataset
-    dataset = load_dataset(
-        dataset_name,
-        split=split,
-        streaming=streaming,
-        trust_remote_code=True
-    )
+    if subset_name:
+        dataset = load_dataset(
+            dataset_name,
+            subset_name,
+            split=split,
+            streaming=streaming,
+            trust_remote_code=True
+        )
+    else:
+        dataset = load_dataset(
+            dataset_name,
+            split=split,
+            streaming=streaming,
+            trust_remote_code=True
+        )
 
     # Limit samples if specified (for testing)
     if num_samples is not None and streaming:

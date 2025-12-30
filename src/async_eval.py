@@ -54,10 +54,9 @@ def evaluate_single_task(
     #checking to see if the the number of gpus required to run the model is less than the number of gpus available
     assert n_gpus_per_model <= n_gpus, \
         "Number of gpus per model cannot be greater than the number of gpus available"
-    
-    #set the environment variable to use the specified gpus
+
+    # Inherit CUDA_VISIBLE_DEVICES from parent process
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in range((n_gpus//n_gpus_per_model)*n_gpus_per_model))
     
     cmd = [
         "lm_eval",
@@ -86,9 +85,27 @@ def evaluate_single_task(
     cmd = prefix + cmd
     if batch_size != "auto":
         cmd += ["--batch_size", str(batch_size)]
-        
+
     logger.info(f"Running command: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True, env=env)
+
+    # Run subprocess and capture output for logging
+    process = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1  # Line buffered
+    )
+
+    # Stream output to logger
+    for line in process.stdout:
+        logger.info(f"[lm_eval] {line.rstrip()}")
+
+    # Wait for process to complete and check return code
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, cmd)
         
         
 
@@ -105,6 +122,7 @@ class EvalConfig:
     n_gpus: int = 1
     n_gpus_per_model: int = 1  # GPUs per model for parallelization
     eval_interval: int = 60  # Seconds between checks
+    use_prexisting_eval: bool = True # Whether to use pre-existing eval results
     wandb_run: Optional[object] = None  # wandb run object for logging
     
     def __post_init__(self):
@@ -136,14 +154,6 @@ class Evaluator:
     def __init__(self, config: EvalConfig):
         self.config = config
         self.wandb_run = config.wandb_run
-
-        # Set up wandb metrics if enabled
-        if self.wandb_run is not None:
-            # Define the iteration as the step metric
-            self.wandb_run.define_metric("iteration")
-            # Define all eval metrics to use iteration as x-axis (wildcard pattern)
-            self.wandb_run.define_metric("eval/*", step_metric="iteration")
-            self.wandb_run.define_metric("baseline/*", step_metric="iteration")
 
     def _log_to_wandb(
         self,
@@ -183,25 +193,23 @@ class Evaluator:
 
                 metrics[key] = metric_value
 
-        # Determine the iteration for logging
+        # Determine the training step for logging
         if is_baseline:
-            # For baseline, we log at iteration 0
-            iteration = 0
+            # For baseline, we log at step 0
+            step = 0
         else:
             # Extract checkpoint step from model_path (e.g., checkpoint-1000 -> 1000)
             checkpoint_name = Path(model_path).name
             if checkpoint_name.startswith("checkpoint-"):
-                iteration = int(checkpoint_name.split("-")[1])
+                step = int(checkpoint_name.split("-")[1])
             else:
                 logger.warning(f"Could not extract step from checkpoint name: {checkpoint_name}")
-                iteration = 0
+                step = 0
 
-        # Add iteration to the metrics dict
-        metrics["iteration"] = iteration
-
-        # Log to wandb using the run object
-        self.wandb_run.log(metrics)
-        logger.info(f"Logged {len(metrics)-1} metrics to wandb at iteration {iteration}")
+        # Log to wandb using the training step
+        # This aligns eval metrics with training metrics on the same timeline
+        self.wandb_run.log(metrics, step=step)
+        logger.info(f"Logged {len(metrics)} metrics to wandb at step {step}")
 
     def _evaluate(self, model_path: Optional[Path] = None, is_baseline: bool = False) -> Dict:
 
@@ -219,22 +227,29 @@ class Evaluator:
         out = {}
         
         for task, fewshot in self.config.eval_tasks.items():
-            logger.info(f"Evaluating task: {task} with {fewshot} few-shots saving to {results_path}")
-            evaluate_single_task(
-                checkpoint_path=model_path,
-                task_name=task,
-                num_fewshot=fewshot,
-                save_path=results_path / f"{task}_fewshot_{fewshot}.json",
-                n_gpus = self.config.n_gpus,
-                n_gpus_per_model=self.config.n_gpus_per_model,
-                batch_size=self.config.batch_size
-            )
-            #load the results
-            results_paths = glob.glob(str(results_path / f"{task}_fewshot_{fewshot}_*.json"))
-            if len(results_paths) > 1:
-                logger.warning(f"Multiple result files found for {task} fewshot {fewshot}, using the first one found.")
+            save_path =results_path / f"{task}_fewshot_{fewshot}.json"
+            if self.config.use_prexisting_eval and len(glob.glob(str(results_path / f"{task}_fewshot_{fewshot}_*.json"))) > 0:
+                # get the latest file
+                results_path = sorted(glob.glob(str(results_path / f"{task}_fewshot_{fewshot}_*.json")), key=os.path.getmtime)[-1]
+                logger.info(f"Using pre-existing evaluation results for task: {task} with {fewshot} few-shots from {results_path}")
+            else:
+                logger.info(f"Evaluating task: {task} with {fewshot} few-shots saving to {results_path}")
+                evaluate_single_task(
+                    checkpoint_path=model_path,
+                    task_name=task,
+                    num_fewshot=fewshot,
+                    save_path=results_path / f"{task}_fewshot_{fewshot}.json",
+                    n_gpus = self.config.n_gpus,
+                    n_gpus_per_model=self.config.n_gpus_per_model,
+                    batch_size=self.config.batch_size
+                )
+                #load the results
+                results_paths = glob.glob(str(results_path / f"{task}_fewshot_{fewshot}_*.json"))
+                if len(results_paths) > 1:
+                    logger.warning(f"Multiple result files found for {task} fewshot {fewshot}, using the first one found.")
+                results_path = results_paths[0]
             
-            with open(results_paths[0], 'r') as f:
+            with open(results_path, 'r') as f:
                 task_results = json.load(f)
             out[f"{task}_fewshot_{fewshot}"] = task_results
 
@@ -292,7 +307,11 @@ class Evaluator:
         utils.clean()
         logger.info(f"GPU Stats: \n{utils.gpu_mem_info()}")
         
-        return self._evaluate(model_path=temp_path)
+        out = self._evaluate(model_path=temp_path)
+        
+        #remove the temporary model to save space
+        utils.rmdir(temp_path)
+        return out
             
     
     def run(self):
@@ -302,7 +321,7 @@ class Evaluator:
         evaluated_checkpoints: Set[Path] = set()
         
         # First evaluate the baseline model
-        self.evaluate_baseline()
+        # self.evaluate_baseline()
         
         logger.info("Starting checkpoint monitoring...")
         
@@ -313,8 +332,9 @@ class Evaluator:
                     logger.info(f"New checkpoint found: {checkpoint_dir}")
                     self.evaluate_checkpoint(checkpoint_dir)
                     logger.info(f"Finished evaluating checkpoint: {checkpoint_dir}")
-                    
+                    evaluated_checkpoints.add(checkpoint_dir)
                     #TODO: Implement rotation/deletion of old checkpoints if needed
             logger.info(f"Sleeping for {self.config.eval_interval} seconds before next check...")
-            raise NotImplementedError("stopping here for now")
+            logger.info(f"")
+            # raise NotImplementedError("stopping here for now")
             time.sleep(self.config.eval_interval)

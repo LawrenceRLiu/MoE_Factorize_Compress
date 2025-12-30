@@ -56,13 +56,13 @@ def main(cfg: DictConfig):
         with open(config_path, "r") as f:
             wandb_info = json.load(f)
         logger.info(f"WandB Run Info: {wandb_info}")
-        #initialize wandb
+        # Initialize wandb in "allow" mode to avoid taking over the console from training
         wandb_run = wandb.init(
             project=wandb_info["project"],
             entity=wandb_info["entity"],
-            name=wandb_info["name"],
-            id=wandb_info["id"],
-            resume="must",
+            name=wandb_info["name"]+"_eval",
+            # id=wandb_info["id"],
+            # resume="allow",  # Allow multiple processes to log without taking over
         )
         logger.info(f"Resumed WandB run: {wandb_run.name} (ID: {wandb_run.id})")
 

@@ -10,10 +10,15 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Union, List
 import json
 import gc
+import shutil
 
 
 logger = logging.getLogger(__name__)
 
+
+def rmdir(path: Union[str, Path]):
+    """Remove a directory and all its contents."""
+    shutil.rmtree(path)
 
 def human_readable(num: Union[int, float], decimals=2)-> str:
     """

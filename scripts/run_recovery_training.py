@@ -302,6 +302,7 @@ def main(cfg: DictConfig):
     logger.info("Preparing training dataset")
     train_dataset = prepare_recovery_dataset(
         dataset_name=cfg.recovery.dataset.name,
+        subset_name=cfg.recovery.dataset.subset_name,
         tokenizer=tokenizer,
         max_length=cfg.recovery.dataset.max_length,
         split=cfg.recovery.dataset.split,
@@ -348,7 +349,7 @@ def main(cfg: DictConfig):
 
     training_args_dict = {
         # Output
-        "output_dir": str(checkpoints_dir / "trainer_state"),
+        "output_dir": str(checkpoints_dir),
         "overwrite_output_dir": True,
 
         # Batch size and accumulation
@@ -377,6 +378,7 @@ def main(cfg: DictConfig):
         "save_steps": training_config.save_steps,
         "save_total_limit": training_config.save_total_limit,
         "save_strategy": "steps",
+        "save_only_model": True,  # Don't save optimizer state (fixes 8bit optimizer FSDP incompatibility)
 
         # Logging
         "logging_steps": training_config.logging_steps,

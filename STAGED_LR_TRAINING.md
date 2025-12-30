@@ -2,6 +2,8 @@
 
 This guide explains how to use the staged learning rate scheduling feature for recovery training.
 
+**Implementation:** Uses a custom LR scheduler ([src/custom_lr_scheduler.py](src/custom_lr_scheduler.py)) that wraps HuggingFace's standard schedulers.
+
 ## Overview
 
 The staged LR scheduler allows you to divide training into multiple stages, each with different learning rates for different parameter groups. This is useful for:
@@ -229,10 +231,14 @@ You can create custom dashboards to visualize:
 
 ### How It Works
 
-1. **Initialization**: On first step, the scheduler builds a cache of parameter names
-2. **Stage transitions**: At the start of each step, the callback checks if we've entered a new stage
-3. **LR updates**: Optimizer parameter groups are updated with new learning rates
-4. **Pattern matching**: First matching pattern wins; falls back to `base_lr_multiplier`
+1. **Scheduler Creation**: `RecoveryTrainer.create_scheduler()` wraps the base HF scheduler with `ParameterGroupLRScheduler`
+2. **Initialization**: Builds a cache of parameter names from the model
+3. **Each Step**:
+   - Base scheduler updates all param groups to base LR (e.g., cosine with warmup)
+   - Custom scheduler immediately applies parameter-specific multipliers
+   - `get_last_lr()` returns the multiplied LRs for logging
+4. **Stage Transitions**: Automatically detected based on step count
+5. **Pattern Matching**: First matching pattern wins; falls back to `base_lr_multiplier`
 
 ### Zero-LR vs Gradient Disabling
 

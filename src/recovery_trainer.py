@@ -48,6 +48,10 @@ class CompressedModelCheckpointCallback(TrainerCallback):
         This overrides the default save behavior to use our custom checkpoint format.
         Checkpoints are saved as checkpoint-{step} to match the expected format
         for async evaluation.
+
+        Uses atomic directory rename to prevent race conditions with async evaluation:
+        - Saves to .checkpoint-{step}.tmp first
+        - Atomically renames to checkpoint-{step} when complete
         """
         model = kwargs.get('model')
         tokenizer = kwargs.get('tokenizer')
@@ -56,11 +60,19 @@ class CompressedModelCheckpointCallback(TrainerCallback):
             logger.warning("Model is None in on_save callback")
             return control
 
-        # Determine checkpoint directory name
-        checkpoint_dir = self.checkpoints_dir / f"checkpoint-{state.global_step}"
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # Use temporary directory for atomic save
+        final_checkpoint_dir = self.checkpoints_dir / f"checkpoint-{state.global_step}"
+        temp_checkpoint_dir = self.checkpoints_dir / f".checkpoint-{state.global_step}.tmp"
 
-        logger.info(f"Saving compressed model checkpoint to {checkpoint_dir}")
+        # Remove temp dir if it exists from a previous failed save
+        if temp_checkpoint_dir.exists():
+            import shutil
+            logger.warning(f"Removing existing temporary checkpoint: {temp_checkpoint_dir}")
+            shutil.rmtree(temp_checkpoint_dir)
+
+        temp_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"Saving compressed model checkpoint to temporary location: {temp_checkpoint_dir}")
 
         # Unwrap model if using FSDP or other wrappers
         unwrapped_model = self._unwrap_model(model)
@@ -86,16 +98,16 @@ class CompressedModelCheckpointCallback(TrainerCallback):
 
         # Only save on rank 0 in distributed training
         if state.is_world_process_zero:
-            # Save model weights
-            torch.save(state_dict, checkpoint_dir / "pytorch_model.bin")
+            # Save model weights to temporary directory
+            torch.save(state_dict, temp_checkpoint_dir / "pytorch_model.bin")
 
             # Save model config if available
             if hasattr(unwrapped_model, 'config'):
-                unwrapped_model.config.save_pretrained(checkpoint_dir)
+                unwrapped_model.config.save_pretrained(temp_checkpoint_dir)
 
             # Save tokenizer
             if tokenizer is not None:
-                tokenizer.save_pretrained(checkpoint_dir)
+                tokenizer.save_pretrained(temp_checkpoint_dir)
 
             # Save training metadata
             metadata = {
@@ -104,10 +116,16 @@ class CompressedModelCheckpointCallback(TrainerCallback):
                 "base_model": self.base_model_name,
                 "is_compressed": True,
             }
-            with open(checkpoint_dir / "training_metadata.json", 'w') as f:
+            with open(temp_checkpoint_dir / "training_metadata.json", 'w') as f:
                 json.dump(metadata, f, indent=2)
 
-            logger.info(f"Checkpoint saved successfully at step {state.global_step}")
+            logger.info(f"All files saved to temporary directory. Performing atomic rename...")
+
+            # Atomic rename: checkpoint appears fully formed or not at all
+            # This prevents async evaluation from seeing partial checkpoints
+            temp_checkpoint_dir.rename(final_checkpoint_dir)
+
+            logger.info(f"Checkpoint saved successfully at step {state.global_step} -> {final_checkpoint_dir}")
 
         return control
 

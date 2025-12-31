@@ -78,6 +78,8 @@ def main(cfg: DictConfig):
         n_gpus=N_GPUS,
         n_gpus_per_model=cfg.evaluation.async_eval.n_gpus_per_model,
         eval_interval=cfg.evaluation.async_eval.eval_interval,
+        max_load_retries=cfg.evaluation.async_eval.get("max_load_retries", 5),
+        retry_wait_time=cfg.evaluation.async_eval.get("retry_wait_time", 30),
         wandb_run=wandb_run
     )
         

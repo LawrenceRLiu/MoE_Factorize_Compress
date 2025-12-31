@@ -19,5 +19,7 @@ batch_size: auto  # Let the system decide based on GPU memory
 async_eval:
   eval_interval: 60  # Check for new checkpoints every 60 seconds
   n_gpus_per_model: 2  # Number of GPUs to use per model during evaluation
+  max_load_retries: 5  # Maximum number of retries when loading incomplete checkpoints
+  retry_wait_time: 30  # Seconds to wait between retries when checkpoint is incomplete
 
 

@@ -124,6 +124,8 @@ class EvalConfig:
     eval_interval: int = 60  # Seconds between checks
     use_prexisting_eval: bool = True # Whether to use pre-existing eval results
     wandb_run: Optional[object] = None  # wandb run object for logging
+    max_load_retries: int = 5  # Maximum number of retries when loading checkpoint
+    retry_wait_time: int = 30  # Seconds to wait between retries
     
     def __post_init__(self):
         # Ensure directories exist
@@ -227,7 +229,6 @@ class Evaluator:
         out = {}
         
         for task, fewshot in self.config.eval_tasks.items():
-            save_path =results_path / f"{task}_fewshot_{fewshot}.json"
             if self.config.use_prexisting_eval and len(glob.glob(str(results_path / f"{task}_fewshot_{fewshot}_*.json"))) > 0:
                 # get the latest file
                 results_path = sorted(glob.glob(str(results_path / f"{task}_fewshot_{fewshot}_*.json")), key=os.path.getmtime)[-1]
@@ -273,45 +274,79 @@ class Evaluator:
     
     def evaluate_checkpoint(self, checkpoint_path: Path) -> Dict:
         """
-        Evaluate a single checkpoint.
+        Evaluate a single checkpoint with retry logic.
 
         Args:
-            checkpoint_path: Path to checkpoint directory, expected to be of the form 
+            checkpoint_path: Path to checkpoint directory, expected to be of the form
             {checkpoint_dir}/checkpoint-*
 
         Returns:
             Evaluation results
         """
         logger.info(f"Evaluating checkpoint: {checkpoint_path}")
-        logger.info(f"GPU Stats: \n{utils.gpu_mem_info()}")
-        # Check if this is a compressed model (has compression_config.json)
-        eval_path = checkpoint_path
-        
-        equivalent_model = get_hf_equivalent_model(
-            compressed_model_path=str(checkpoint_path),
-            original_model_name=self.config.original_model_name,
-            device_map="auto",
-            dtype=torch.bfloat16
-        )
-        
-        #save the equivalent to a temporary path
-        temp_path = self.config.temp_dir / checkpoint_path.name # something like temp_dir/checkpoint-0
-        equivalent_model.save_pretrained(temp_path)
-        
-        tokenizer = AutoTokenizer.from_pretrained(self.config.original_model_name)
-        tokenizer.save_pretrained(temp_path)
-        
-        del equivalent_model
-        del tokenizer
-        
-        utils.clean()
-        logger.info(f"GPU Stats: \n{utils.gpu_mem_info()}")
-        
-        out = self._evaluate(model_path=temp_path)
-        
-        #remove the temporary model to save space
-        utils.rmdir(temp_path)
-        return out
+
+        # Retry loop to handle checkpoints that are still being saved
+        for attempt in range(self.config.max_load_retries):
+
+            # Checkpoint appears complete, try to load it
+            try:
+                logger.info(f"Checkpoint appears complete. Attempting to load...")
+                logger.info(f"GPU Stats: \n{utils.gpu_mem_info()}")
+
+                relative_path = checkpoint_path.relative_to(self.config.checkpoint_dir) #something along the lines of checkpoint-0
+                results_path = self.config.eval_dir / relative_path / "eval_results"
+                
+                #if the results already exist, we skip equivalent model generation
+                skip = True
+                for task, fewshot in self.config.eval_tasks.items():
+                    exists = (self.config.use_prexisting_eval and len(glob.glob(str(results_path / f"{task}_fewshot_{fewshot}_*.json"))) > 0)
+                    skip = skip and exists
+                if skip:
+                    logger.info(f"Evaluation results already exist for checkpoint {checkpoint_path}, skipping equivalent model generation.")
+                    #just give the evaluator a path to the temp model if it existed
+                    temp_path = self.config.temp_dir / checkpoint_path.name # something like temp_dir/checkpoint-0
+                else:
+                    equivalent_model = get_hf_equivalent_model(
+                        compressed_model_path=str(checkpoint_path),
+                        original_model_name=self.config.original_model_name,
+                        device_map="auto",
+                        dtype=torch.bfloat16
+                    )
+
+                    # Save the equivalent to a temporary path
+                    temp_path = self.config.temp_dir / checkpoint_path.name # something like temp_dir/checkpoint-0
+                    equivalent_model.save_pretrained(temp_path)
+
+                    tokenizer = AutoTokenizer.from_pretrained(self.config.original_model_name)
+                    tokenizer.save_pretrained(temp_path)
+
+                    del equivalent_model
+                    del tokenizer
+
+                    utils.clean()
+                    logger.info(f"GPU Stats: \n{utils.gpu_mem_info()}")
+
+                #the evaluator will check for pre-existing evals
+                out = self._evaluate(model_path=temp_path)
+
+                # Remove the temporary model to save space
+                if temp_path.exists():
+                    utils.rmdir(temp_path)
+                return out
+
+            except OSError as e:
+                logger.warning(
+                    f"Failed to load checkpoint (attempt {attempt + 1}/{self.config.max_load_retries}): {e}"
+                )
+                if attempt < self.config.max_load_retries - 1:
+                    logger.info(f"Waiting {self.config.retry_wait_time} seconds before retry...")
+                    time.sleep(self.config.retry_wait_time)
+                else:
+                    logger.error(f"Failed to load checkpoint after {self.config.max_load_retries} attempts")
+                    raise e
+
+        # Should not reach here, but just in case
+        raise RuntimeError(f"Failed to evaluate checkpoint {checkpoint_path} after {self.config.max_load_retries} attempts")
             
     
     def run(self):
